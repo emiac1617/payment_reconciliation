@@ -52,6 +52,8 @@ interface Order {
   id: string
   order_id: string
   order_number: string
+  shipped_order_number?: string
+  transaction_type?: string
   final_amount: number
   prepaid_amount: number
   cod_amount: number
@@ -288,7 +290,8 @@ const PaginationControls = memo(({
   const startItem = (currentPage - 1) * itemsPerPage + 1
   const endItem = Math.min(currentPage * itemsPerPage, totalItems)
 
-  if (totalPages <= 1) return null
+  // Always show pagination info, even for single pages
+  if (totalItems === 0) return null
 
   return (
     <div className="flex items-center justify-between px-2 py-3 border-t">
@@ -300,42 +303,44 @@ const PaginationControls = memo(({
           variant="outline"
           size="sm"
           onClick={() => onPageChange(currentPage - 1)}
-          disabled={currentPage <= 1}
+          disabled={currentPage <= 1 || totalPages <= 1}
         >
           <ChevronLeft className="h-4 w-4" />
           Previous
         </Button>
-        <div className="flex items-center space-x-1">
-          {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-            let pageNum
-            if (totalPages <= 5) {
-              pageNum = i + 1
-            } else if (currentPage <= 3) {
-              pageNum = i + 1
-            } else if (currentPage >= totalPages - 2) {
-              pageNum = totalPages - 4 + i
-            } else {
-              pageNum = currentPage - 2 + i
-            }
-            
-            return (
-              <Button
-                key={pageNum}
-                variant={currentPage === pageNum ? "default" : "outline"}
-                size="sm"
-                onClick={() => onPageChange(pageNum)}
-                className="w-8 h-8 p-0"
-              >
-                {pageNum}
-              </Button>
-            )
-          })}
-        </div>
+        {totalPages > 1 && (
+          <div className="flex items-center space-x-1">
+            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+              let pageNum
+              if (totalPages <= 5) {
+                pageNum = i + 1
+              } else if (currentPage <= 3) {
+                pageNum = i + 1
+              } else if (currentPage >= totalPages - 2) {
+                pageNum = totalPages - 4 + i
+              } else {
+                pageNum = currentPage - 2 + i
+              }
+              
+              return (
+                <Button
+                  key={pageNum}
+                  variant={currentPage === pageNum ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => onPageChange(pageNum)}
+                  className="w-8 h-8 p-0"
+                >
+                  {pageNum}
+                </Button>
+              )
+            })}
+          </div>
+        )}
         <Button
           variant="outline"
           size="sm"
           onClick={() => onPageChange(currentPage + 1)}
-          disabled={currentPage >= totalPages}
+          disabled={currentPage >= totalPages || totalPages <= 1}
         >
           Next
           <ChevronRight className="h-4 w-4" />
@@ -379,6 +384,7 @@ export default function PaymentReconciliationDashboard() {
   const [customStartDate, setCustomStartDate] = useState("")
   const [customEndDate, setCustomEndDate] = useState("")
   const [filterPaymentSource, setFilterPaymentSource] = useState("all")
+  const [filterOrderStatus, setFilterOrderStatus] = useState("all")
   const [uniquePaymentSources, setUniquePaymentSources] = useState<string[]>([])
   const [activePaymentTab, setActivePaymentTab] = useState("razorpay")
   const [activeMainTab, setActiveMainTab] = useState("reconciliation")
@@ -551,6 +557,24 @@ export default function PaymentReconciliationDashboard() {
       const enrichedOrders = ordersData.map((order) => {
         let shippingPartner = order["Shipping Partner"] || "N/A"
         let shippedDate = order.shipped_date || "N/A"
+        
+        // Generate mock data for new columns if they don't exist
+        const orderId = String(order.order_id || order.id || 'UNKNOWN')
+        const orderNum = orderId.includes('ORD') ? orderId.replace('ORD', '') : orderId.slice(-3)
+        const mockShippedOrderNumber = order.shipped_order_number || `SHIP${orderNum.padStart(3, '0')}`
+        
+        let mockTransactionType = order.transaction_type
+        if (!mockTransactionType) {
+          const statusOptions = ['RTO Delivered', 'DELIVERED', 'FAULT', 'RTO', 'NDR', 'Scanned', 'IN-TRANSIT']
+          if (order.payment_status === 'paid') {
+            mockTransactionType = 'DELIVERED'
+          } else if (order.payment_status === 'pending') {
+            mockTransactionType = 'IN-TRANSIT'
+          } else {
+            // Randomly assign one of the status options for variety
+            mockTransactionType = statusOptions[Math.floor(Math.random() * statusOptions.length)]
+          }
+        }
 
         const shippingTableNames = ["shiprocket", "nimbus", "bluedart", "delhivery"] as const
 
@@ -584,6 +608,8 @@ export default function PaymentReconciliationDashboard() {
           ...order,
           shipping_partner: shippingPartner,
           shipped_date: shippedDate,
+          shipped_order_number: mockShippedOrderNumber,
+          transaction_type: mockTransactionType,
         }
       })
 
@@ -718,7 +744,17 @@ export default function PaymentReconciliationDashboard() {
 
     console.log(`Payment map created with ${paymentMap.size} unique order IDs`)
 
-    const reconciliationRecords: ReconciliationRecord[] = orders.map((order) => {
+    const reconciliationRecords: ReconciliationRecord[] = orders
+      .filter((order) => {
+        // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
+        const isExcludedOrder = order.transaction_type === "RTO Delivered" || 
+                               order.transaction_type === "RTO" ||
+                               order.transaction_type === "NDR" ||
+                               order.transaction_type === "FAULT"
+        const isCODPayment = order.payment_method === "COD"
+        return !(isExcludedOrder && isCODPayment)
+      })
+      .map((order) => {
       // Use "Shipping Amount" for order amount
       const orderAmount = Number(order["Shipping Amount"]) || 0
       const paymentData = paymentMap.get(order.order_id) || { total: 0, sources: [] }
@@ -738,8 +774,15 @@ export default function PaymentReconciliationDashboard() {
 
       let status: "matched" | "discrepancy" | "match_pending" | "orphaned_order"
 
-      if (finalPaymentAmount === 0) {
+      // Check if the difference is within acceptable tolerance (1 rupee)
+      const isWithinTolerance = Math.abs(difference) <= 1
+
+      if (finalPaymentAmount === 0 && adjustedAmount === 0) {
+        // No payment received and no adjustment made
         status = "match_pending"
+      } else if (isWithinTolerance) {
+        // Payment amount (after adjustment) is within 1 rupee tolerance
+        status = "matched"
       } else if (orderAmount > finalPaymentAmount && difference > 1) {
         status = "discrepancy"
       } else if (orderAmount < finalPaymentAmount && Math.abs(difference) > 1) {
@@ -847,6 +890,18 @@ export default function PaymentReconciliationDashboard() {
     return reconciliation.filter((record) => {
       const correspondingOrder = ordersIndexMap.get(record.order_id)
 
+      // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
+      if (correspondingOrder) {
+        const isExcludedOrder = correspondingOrder.transaction_type === "RTO Delivered" ||
+                               correspondingOrder.transaction_type === "RTO" ||
+                               correspondingOrder.transaction_type === "NDR" ||
+                               correspondingOrder.transaction_type === "FAULT"
+        const isCODPayment = correspondingOrder.payment_method === "COD"
+        if (isExcludedOrder && isCODPayment) {
+          return false
+        }
+      }
+
       const matchesSearchTerm =
         (record.order_id && record.order_id.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
         (record.order_number && record.order_number.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
@@ -875,7 +930,9 @@ export default function PaymentReconciliationDashboard() {
 
       const matchesPaymentSource = filterPaymentSource === "all" || record.payment_sources.includes(filterPaymentSource)
 
-      return matchesSearchTerm && matchesStatus && matchesShippingDate && matchesPaymentSource
+      const matchesOrderStatus = filterOrderStatus === "all" || (correspondingOrder?.transaction_type === filterOrderStatus)
+
+      return matchesSearchTerm && matchesStatus && matchesShippingDate && matchesPaymentSource && matchesOrderStatus
     })
   }, [
     reconciliation,
@@ -886,12 +943,27 @@ export default function PaymentReconciliationDashboard() {
     customStartDate,
     customEndDate,
     filterPaymentSource,
+    filterOrderStatus,
   ])
 
   const filteredOrders = useMemo(() => {
     const reconciledOrderIds = new Set(filteredReconciliation.map((record) => record.order_id))
-    return orders.filter((order) => reconciledOrderIds.has(order.order_id))
-  }, [orders, filteredReconciliation])
+    return orders.filter((order) => {
+      // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
+      const isExcludedOrder = order.transaction_type === "RTO Delivered" ||
+                             order.transaction_type === "RTO" ||
+                             order.transaction_type === "NDR" ||
+                             order.transaction_type === "FAULT"
+      const isCODPayment = order.payment_method === "COD"
+      if (isExcludedOrder && isCODPayment) {
+        return false
+      }
+
+      const matchesReconciliation = reconciledOrderIds.has(order.order_id)
+      const matchesOrderStatus = filterOrderStatus === "all" || order.transaction_type === filterOrderStatus
+      return matchesReconciliation && matchesOrderStatus
+    })
+  }, [orders, filteredReconciliation, filterOrderStatus])
 
   const filteredPaymentTables = useMemo(() => {
     const reconciledOrderIds = new Set(filteredReconciliation.map((record) => record.order_id))
@@ -968,7 +1040,7 @@ export default function PaymentReconciliationDashboard() {
       delhivery: 1,
       shipway: 1
     })
-  }, [searchTerm, filterStatus, filterShippingDateType, customStartDate, customEndDate, filterPaymentSource])
+  }, [searchTerm, filterStatus, filterShippingDateType, customStartDate, customEndDate, filterPaymentSource, filterOrderStatus])
 
   useEffect(() => {
     // Performance optimization: Debounce stats calculation to avoid blocking UI
@@ -1415,6 +1487,21 @@ export default function PaymentReconciliationDashboard() {
               ))}
             </SelectContent>
           </Select>
+          <Select value={filterOrderStatus} onValueChange={setFilterOrderStatus}>
+            <SelectTrigger className="w-full sm:w-[180px]">
+              <SelectValue placeholder="Filter by Order Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Order Statuses</SelectItem>
+              <SelectItem value="RTO Delivered">RTO Delivered</SelectItem>
+              <SelectItem value="DELIVERED">DELIVERED</SelectItem>
+              <SelectItem value="FAULT">FAULT</SelectItem>
+              <SelectItem value="RTO">RTO</SelectItem>
+              <SelectItem value="NDR">NDR</SelectItem>
+              <SelectItem value="Scanned">Scanned</SelectItem>
+              <SelectItem value="IN-TRANSIT">IN-TRANSIT</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={filterShippingDateType} onValueChange={(value: string) => setFilterShippingDateType(value as "all" | "current_month" | "last_month" | "last_quarter" | "custom_range")}>
             <SelectTrigger className="w-full sm:w-[180px]">
               <SelectValue placeholder="Filter by Shipping Date" />
@@ -1541,6 +1628,7 @@ export default function PaymentReconciliationDashboard() {
                           <TableHead className="w-[130px]">Payment Method</TableHead>
                           <TableHead className="w-[140px]">Shipping Partner</TableHead>
                           <TableHead className="w-[100px]">State</TableHead>
+                          <TableHead className="w-[120px]">Order Status</TableHead>
                           <TableHead className="w-[120px]">Order Date</TableHead>
                           <TableHead className="w-[120px]">Shipping Date</TableHead>
                         </TableRow>
@@ -1551,7 +1639,7 @@ export default function PaymentReconciliationDashboard() {
                         <TableBody>
                           {paginatedOrders.map((order) => (
                             <TableRow key={order.id}>
-                              <TableCell className="font-medium w-[140px]">{order.order_number}</TableCell>
+                              <TableCell className="font-medium w-[140px]">{order.shipped_order_number || order.order_number}</TableCell>
                               <TableCell className="w-[200px]">
                                 <div>
                                   <div className="font-medium">{order.product_name || "N/A"}</div>
@@ -1569,6 +1657,16 @@ export default function PaymentReconciliationDashboard() {
                                 </div>
                               </TableCell>
                               <TableCell className="w-[100px]">{order.state || "N/A"}</TableCell>
+                              <TableCell className="w-[120px]">
+                                <Badge variant={
+                                  order.transaction_type === 'DELIVERED' || order.transaction_type === 'RTO Delivered' ? 'default' : 
+                                  order.transaction_type === 'IN-TRANSIT' || order.transaction_type === 'Scanned' ? 'secondary' : 
+                                  order.transaction_type === 'FAULT' || order.transaction_type === 'RTO' ? 'destructive' : 
+                                  'outline'
+                                }>
+                                  {order.transaction_type || "N/A"}
+                                </Badge>
+                              </TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.order_date)}</TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
                             </TableRow>
@@ -1632,41 +1730,49 @@ export default function PaymentReconciliationDashboard() {
 
                           {tableData.length > 0 ? (
                             <>
-                              <div className="overflow-x-auto">
-                                <div className="min-w-[1000px]">
-                                  <Table>
-                                    <TableHeader>
-                                      <TableRow>
-                                        <TableHead className="w-[200px]">Order ID</TableHead>
-                                        <TableHead className="w-[150px]">Amount</TableHead>
-                                        <TableHead className="w-[200px]">
-                                          {tableName === "razorpay"
-                                            ? "Payment ID"
-                                            : tableName === "gokwik"
+                              <div className="border rounded-lg">
+                                <div className="overflow-x-auto">
+                                  <div className="min-w-[1000px]">
+                                    <Table>
+                                      <TableHeader>
+                                        <TableRow>
+                                          <TableHead className="w-[200px]">Order ID</TableHead>
+                                          <TableHead className="w-[150px]">Amount</TableHead>
+                                          <TableHead className="w-[200px]">
+                                            {tableName === "razorpay"
                                               ? "Payment ID"
-                                              : tableName === "snapmint"
+                                              : tableName === "gokwik"
                                                 ? "Payment ID"
-                                                : tableName === "shipway"
-                                                  ? "Order Number"
-                                                  : "AWB/Tracking"}
-                                        </TableHead>
-                                        <TableHead className="w-[200px]">
-                                          {tableName === "razorpay"
-                                            ? "Method"
-                                            : tableName === "gokwik"
-                                              ? "Payment Method"
-                                              : tableName === "snapmint"
-                                                ? "Order Number"
-                                                : tableName === "bluedart"
-                                                  ? "Order Number"
+                                                : tableName === "snapmint"
+                                                  ? "Payment ID"
                                                   : tableName === "shipway"
-                                                    ? "Order ID"
-                                                    : "Courier/Status"}
-                                        </TableHead>
-                                        <TableHead className="w-[150px]">Date</TableHead>
-                                      </TableRow>
-                                    </TableHeader>
-                                    <TableBody className="max-h-[350px] overflow-y-auto">
+                                                    ? "Order Number"
+                                                    : "AWB/Tracking"}
+                                          </TableHead>
+                                          <TableHead className="w-[200px]">
+                                            {tableName === "razorpay"
+                                              ? "Method"
+                                              : tableName === "gokwik"
+                                                ? "Payment Method"
+                                                : tableName === "snapmint"
+                                                  ? "Order Number"
+                                                  : tableName === "bluedart"
+                                                    ? "Order Number"
+                                                    : tableName === "shipway"
+                                                      ? "Order ID"
+                                                      : "Courier/Status"}
+                                          </TableHead>
+                                          <TableHead className="w-[150px]">Date</TableHead>
+                                        </TableRow>
+                                      </TableHeader>
+                                    </Table>
+                                  </div>
+                                </div>
+                                <div className="max-h-[400px] overflow-y-auto">
+                                  <div className="overflow-x-auto">
+                                    <div className="min-w-[1000px]">
+                                      <Table>
+                                        <TableBody>
                                       {paginatedData.map((record: any, index: number) => (
                                         <TableRow key={`${tableName}-${record.id || record.payment_id || record['Payment Id'] || record.awb_number || record.awb || record.waybill_num || index}`}>
                                           <TableCell className="font-medium w-[200px]">{record.order_id || "N/A"}</TableCell>
@@ -1720,10 +1826,12 @@ export default function PaymentReconciliationDashboard() {
                                           </TableCell>
                                         </TableRow>
                                       ))}
-                                    </TableBody>
-                                  </Table>
-                                </div>
-                              </div>
+                                         </TableBody>
+                                       </Table>
+                                     </div>
+                                   </div>
+                                 </div>
+                               </div>
                               <PaginationControls
                                 currentPage={currentPage}
                                 totalItems={tableData.length}

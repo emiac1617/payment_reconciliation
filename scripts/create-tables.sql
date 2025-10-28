@@ -9,9 +9,13 @@ CREATE TABLE IF NOT EXISTS orders (
     status VARCHAR(50) DEFAULT 'pending',
     payment_status VARCHAR(50) DEFAULT 'pending',
     shipping_partner VARCHAR(255),
+    store VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Index to speed up store-based querying
+CREATE INDEX IF NOT EXISTS idx_orders_store ON orders(store);
 
 -- Create payments table for Razorpay (corrected name and columns as per schema)
 CREATE TABLE IF NOT EXISTS razorpay (

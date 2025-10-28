@@ -17,11 +17,15 @@ interface Order {
   shipping_partner: string
   order_date: string
   shipped_date: string
+  payment_captured_date?: string
   product_name: string
   quantity: number
   customer_name?: string
   customer_email?: string
   customer_phone?: string
+  sku?: string
+  hsn_code?: string
+  igst?: number
 }
 
 interface ReconciliationRecord {
@@ -195,8 +199,24 @@ export function ReconciliationDetailDialog({
                   <span className="font-medium">{formatDateForDisplay(orderDetail.shipped_date)}</span>
                 </div>
                 <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">Payment Date:</span>
+                  <span className="font-medium">{formatDateForDisplay(orderDetail.payment_captured_date)}</span>
+                </div>
+                <div className="flex justify-between items-center">
                   <span className="text-muted-foreground">Order State:</span>
                   <span className="font-medium">{orderDetail.state || "N/A"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">SKU:</span>
+                  <span className="font-medium">{orderDetail.sku || "N/A"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">HSN Code:</span>
+                  <span className="font-medium">{orderDetail.hsn_code || "N/A"}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-muted-foreground">IGST:</span>
+                  <span className="font-medium">{orderDetail.igst ? `${orderDetail.igst.toFixed(2)}%` : "N/A"}</span>
                 </div>
               </CardContent>
             </Card>

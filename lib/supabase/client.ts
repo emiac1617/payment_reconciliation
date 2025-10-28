@@ -51,7 +51,7 @@ export class DatabaseService {
     try {
       console.log("Fetching all payment and shipping data...")
 
-      const [razorpayRes, gokwikRes, shiprocketRes, nimbusRes, bluedartRes, delhiveryRes, snapmintRes, shipwayRes] = await Promise.all([
+      const [razorpayRes, gokwikRes, shiprocketRes, nimbusRes, bluedartRes, delhiveryRes, snapmintRes, shipwayRes, credPayRes, indiaPostRes] = await Promise.all([
         supabase.from("razorpay").select("*"),
         supabase.from("gokwik").select("*"),
         supabase.from("shiprocket").select("*"),
@@ -60,6 +60,8 @@ export class DatabaseService {
         supabase.from("delhivery").select("*"),
         supabase.from("snapmint").select("*"),
         supabase.from("shipway").select("*"),
+        supabase.from("cred_pay").select("*"),
+        supabase.from("india_post").select("*"),
       ])
 
       // Debug snapmint specifically
@@ -85,6 +87,8 @@ export class DatabaseService {
         delhivery: delhiveryRes.data || [],
         snapmint: snapmintRes.data || [],
         shipway: shipwayData,
+        cred_pay: credPayRes.data || [],
+        india_post: indiaPostRes.data || [],
       }
 
       console.log("Payment table data counts:", {
@@ -96,6 +100,8 @@ export class DatabaseService {
         delhivery: results.delhivery.length,
         snapmint: results.snapmint.length,
         shipway: results.shipway.length,
+        cred_pay: results.cred_pay.length,
+        india_post: results.india_post.length,
       })
 
       return results
@@ -110,7 +116,25 @@ export class DatabaseService {
         delhivery: [],
         snapmint: [],
         shipway: mockShipwayData,
+        cred_pay: [],
+        india_post: [],
       }
+    }
+  }
+
+  static async getCreditNotes() {
+    try {
+      console.log("Fetching credit_notes...")
+      const { data, error } = await supabase.from("credit_notes").select("*")
+      if (error) {
+        console.error("credit_notes fetch error:", error)
+        return []
+      }
+      console.log(`Fetched ${data?.length || 0} credit notes`)
+      return data || []
+    } catch (error) {
+      console.error("Error fetching credit_notes:", error)
+      return []
     }
   }
 

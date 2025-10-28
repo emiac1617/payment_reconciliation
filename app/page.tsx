@@ -29,10 +29,13 @@ import {
   Eye,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
 } from "lucide-react"
 import type { Session } from "@supabase/supabase-js"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { AuthApiError } from "@supabase/supabase-js"
 import { exportToCsv } from "@/lib/csv-utils"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -64,6 +67,8 @@ interface Order {
   shipping_partner: string
   order_date: string
   shipped_date: string
+  delivered_date?: string
+  payment_captured_date?: string
   product_name: string
   quantity: number
   customer_name?: string
@@ -72,6 +77,10 @@ interface Order {
   "Shipping Amount"?: number
   adjusted_amount?: number
   remark?: string
+  sku?: string
+  hsn_code?: string
+  igst?: number
+  store?: string
 }
 
 interface PaymentTableData {
@@ -83,6 +92,8 @@ interface PaymentTableData {
   delhivery: any[]
   snapmint: any[]
   shipway: any[]
+  cred_pay: any[]
+  india_post: any[]
 }
 
 interface ReconciliationRecord {
@@ -113,7 +124,8 @@ const ReconciliationTableRow = memo(({
   setEditValues,
   formatDateForDisplay,
   getStatusBadge,
-  originalAdjustedAmount
+  originalAdjustedAmount,
+  ordersIndexMap
 }: {
   record: ReconciliationRecord
   editingRecord: string | null
@@ -128,8 +140,10 @@ const ReconciliationTableRow = memo(({
   formatDateForDisplay: (dateString: string | null | undefined) => string
   getStatusBadge: (status: string) => React.JSX.Element
   originalAdjustedAmount: number
+  ordersIndexMap: Map<string, Order>
 }) => {
   const isEditing = editingRecord === record.order_id
+  const correspondingOrder = ordersIndexMap.get(record.order_id)
   
   // Helper function to check if remark is required
   const isRemarkRequired = () => {
@@ -142,6 +156,11 @@ const ReconciliationTableRow = memo(({
       <TableCell className="w-[140px] font-medium">
         <div className="truncate" title={record.order_number || "N/A"}>
           {record.order_number || "N/A"}
+        </div>
+      </TableCell>
+      <TableCell className="w-[120px]">
+        <div className="truncate" title={correspondingOrder?.store || "N/A"}>
+          {correspondingOrder?.store || "N/A"}
         </div>
       </TableCell>
       <TableCell className="w-[120px] text-right">
@@ -373,19 +392,25 @@ export default function PaymentReconciliationDashboard() {
     delhivery: [],
     snapmint: [],
     shipway: [],
+    cred_pay: [],
+    india_post: [],
   })
   const [reconciliation, setReconciliation] = useState<ReconciliationRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState("all")
+  const [filterDateType, setFilterDateType] = useState<"order_date" | "shipped_date" | "delivered_date" | "payment_captured_date">("shipped_date")
   const [filterShippingDateType, setFilterShippingDateType] = useState<
     "all" | "current_month" | "last_month" | "last_quarter" | "custom_range"
   >("current_month")
   const [customStartDate, setCustomStartDate] = useState("")
   const [customEndDate, setCustomEndDate] = useState("")
   const [filterPaymentSource, setFilterPaymentSource] = useState("all")
+  const [filterPaymentMethod, setFilterPaymentMethod] = useState<string[]>([])
   const [filterOrderStatus, setFilterOrderStatus] = useState("all")
+  const [filterStore, setFilterStore] = useState("all")
   const [uniquePaymentSources, setUniquePaymentSources] = useState<string[]>([])
+  const [storeOptions, setStoreOptions] = useState<string[]>([])
   const [activePaymentTab, setActivePaymentTab] = useState("razorpay")
   const [activeMainTab, setActiveMainTab] = useState("reconciliation")
   const router = useRouter()
@@ -422,14 +447,46 @@ export default function PaymentReconciliationDashboard() {
     nimbus: 1,
     bluedart: 1,
     delhivery: 1,
-    shipway: 1
+    shipway: 1,
+    cred_pay: 1,
+    india_post: 1
   })
   const itemsPerPage = 50
+
+  // Credit notes state and pagination
+  const [creditNotes, setCreditNotes] = useState<any[]>([])
+  const [creditNotesPage, setCreditNotesPage] = useState(1)
+
+  // Helper function to handle payment method multi-select
+  const handlePaymentMethodChange = (value: string) => {
+    if (value === "all") {
+      setFilterPaymentMethod(["all"])
+    } else {
+      const newSelection = filterPaymentMethod.includes("all") 
+        ? [value] 
+        : filterPaymentMethod.includes(value)
+          ? filterPaymentMethod.filter(item => item !== value)
+          : [...filterPaymentMethod, value]
+      
+      setFilterPaymentMethod(newSelection)
+    }
+  }
 
   // Performance optimization: Create indexed maps for faster lookups
   const [paymentIndexMap, setPaymentIndexMap] = useState<Map<string, any[]>>(new Map())
   const [shippingIndexMap, setShippingIndexMap] = useState<Map<string, any[]>>(new Map())
   const [ordersIndexMap, setOrdersIndexMap] = useState<Map<string, Order>>(new Map())
+  const [ordersNumberIndexMap, setOrdersNumberIndexMap] = useState<Map<string, Order>>(new Map())
+  const [credPaySort, setCredPaySort] = useState<{ key: 'amount' | 'date'; dir: 'asc' | 'desc' }>({ key: 'date', dir: 'desc' })
+  const [indiaPostSort, setIndiaPostSort] = useState<{ key: 'amount' | 'date'; dir: 'asc' | 'desc' }>({ key: 'date', dir: 'desc' })
+  // Removed Inventory-specific state: page, SKU expansion, and SKU dialog
+  // Inventory tab states
+  const [inventoryPage, setInventoryPage] = useState(1)
+  const [expandedSkus, setExpandedSkus] = useState<Set<string>>(new Set())
+  const [inventorySearchTerm, setInventorySearchTerm] = useState("")
+  const [isSkuDialogOpen, setIsSkuDialogOpen] = useState(false)
+  const [selectedSku, setSelectedSku] = useState<string | null>(null)
+  const [selectedSkuOrders, setSelectedSkuOrders] = useState<Order[]>([])
 
   const formatDateForDisplay = (dateString: string | null | undefined): string => {
     if (!dateString || dateString.trim() === "" || dateString === "N/A") {
@@ -502,21 +559,25 @@ export default function PaymentReconciliationDashboard() {
     const paymentMap = new Map<string, any[]>()
     const shippingMap = new Map<string, any[]>()
     const ordersMap = new Map<string, Order>()
+    const ordersNumberMap = new Map<string, Order>()
 
     // Build orders index map
     ordersData.forEach((order) => {
       ordersMap.set(order.order_id, order)
+      if (order.order_number) {
+        ordersNumberMap.set(order.order_number, order)
+      }
     })
 
     Object.entries(paymentTablesData).forEach(([tableName, tableData]) => {
       tableData.forEach((item: any) => {
         const orderId = item.order_id || item.order_number
         if (orderId) {
-          if (["razorpay", "gokwik", "snapmint"].includes(tableName)) {
+          if (["razorpay", "gokwik", "snapmint", "cred_pay"].includes(tableName)) {
             const existing = paymentMap.get(orderId) || []
             existing.push({ ...item, gateway: tableName })
             paymentMap.set(orderId, existing)
-          } else if (["shiprocket", "nimbus", "bluedart", "delhivery"].includes(tableName)) {
+          } else if (["shiprocket", "nimbus", "bluedart", "delhivery", "india_post"].includes(tableName)) {
             const existing = shippingMap.get(orderId) || []
             existing.push({ ...item, partner: tableName })
             shippingMap.set(orderId, existing)
@@ -528,6 +589,7 @@ export default function PaymentReconciliationDashboard() {
     setPaymentIndexMap(paymentMap)
     setShippingIndexMap(shippingMap)
     setOrdersIndexMap(ordersMap)
+    setOrdersNumberIndexMap(ordersNumberMap)
   }
 
   const loadData = async () => {
@@ -548,9 +610,28 @@ export default function PaymentReconciliationDashboard() {
         DatabaseService.getAllPaymentTables(),
       ])
 
+      // Fetch credit notes via server API for reliable RLS/auth handling
+      let creditNotesData: any[] = []
+      try {
+        const res = await fetch('/api/credit-notes', { cache: 'no-store' })
+        if (res.ok) {
+          creditNotesData = await res.json()
+        } else {
+          console.warn('Credit notes API returned non-200:', res.status)
+        }
+      } catch (e) {
+        console.error('Failed to fetch credit notes from API, falling back to client fetch:', e)
+        try {
+          creditNotesData = await DatabaseService.getCreditNotes()
+        } catch (e2) {
+          console.error('Fallback client fetch for credit notes also failed:', e2)
+        }
+      }
+
       console.log("Data loaded:", {
         orders: ordersData.length,
         paymentTables: Object.entries(paymentTablesData).map(([key, value]) => `${key}: ${value.length}`),
+        creditNotes: creditNotesData.length,
         reconciliationColumnsExist: columnsExist,
       })
 
@@ -604,17 +685,92 @@ export default function PaymentReconciliationDashboard() {
           }
         }
 
+        // Derive payment captured date from payment tables
+        let paymentCapturedDate: string = order.payment_captured_date || ""
+        try {
+          const normalizedSource = (order.payment_source || "").toLowerCase()
+          const preferredGateways: string[] = []
+          if (normalizedSource.includes("razor")) preferredGateways.push("razorpay")
+          if (normalizedSource.includes("gok")) preferredGateways.push("gokwik")
+          if (normalizedSource.includes("snap")) preferredGateways.push("snapmint")
+          if (normalizedSource.includes("cred")) preferredGateways.push("cred_pay")
+
+          const paymentDateCandidates: { gateway: string; dateStr: string }[] = []
+
+          // Collect candidate dates from each payment table for this order
+          const rpRecords = paymentTablesData.razorpay.filter((p: any) => p.order_id === order.order_id)
+          rpRecords.forEach((p: any) => {
+            const dateStr = p.createdAt || p.created_at
+            if (dateStr) paymentDateCandidates.push({ gateway: "razorpay", dateStr })
+          })
+
+          const gokwikRecords = paymentTablesData.gokwik.filter((p: any) => p.order_id === order.order_id)
+          gokwikRecords.forEach((p: any) => {
+            const dateStr = p["Transaction Date"] || p.created_at
+            if (dateStr) paymentDateCandidates.push({ gateway: "gokwik", dateStr })
+          })
+
+          const snapmintRecords = paymentTablesData.snapmint.filter((p: any) => p.order_id === order.order_id)
+          snapmintRecords.forEach((p: any) => {
+            const dateStr = p.created_at
+            if (dateStr) paymentDateCandidates.push({ gateway: "snapmint", dateStr })
+          })
+
+          const credPayRecords = paymentTablesData.cred_pay.filter((p: any) => p.order_id === order.order_id)
+          credPayRecords.forEach((p: any) => {
+            const dateStr = p.created_at || p.Settlement_Time
+            if (dateStr) paymentDateCandidates.push({ gateway: "cred_pay", dateStr })
+          })
+
+          // Prefer candidate dates from the matching payment source, otherwise consider all
+          const candidatesPreferred = preferredGateways.length
+            ? paymentDateCandidates.filter((c) => preferredGateways.includes(c.gateway))
+            : paymentDateCandidates
+
+          const candidatesToUse = candidatesPreferred.length > 0 ? candidatesPreferred : paymentDateCandidates
+
+          if (candidatesToUse.length > 0) {
+            // Choose the latest valid date
+            const latest = candidatesToUse
+              .map((c) => ({ c, d: new Date(c.dateStr) }))
+              .filter((x) => !isNaN(x.d.getTime()))
+              .sort((a, b) => b.d.getTime() - a.d.getTime())[0]
+            if (latest) {
+              paymentCapturedDate = latest.d.toISOString()
+            }
+          }
+        } catch (e) {
+          console.warn("Failed to derive payment_captured_date for order", order.order_id, e)
+        }
+
         return {
           ...order,
+          // Normalize store field - database uses 'Store' (capital S)
+          store: (order as any).Store ?? (order as any).store ?? undefined,
           shipping_partner: shippingPartner,
           shipped_date: shippedDate,
           shipped_order_number: mockShippedOrderNumber,
           transaction_type: mockTransactionType,
+          payment_captured_date: paymentCapturedDate || "N/A",
         }
       })
 
       setOrders(enrichedOrders)
       setPaymentTables(paymentTablesData)
+      setCreditNotes(creditNotesData)
+      
+      // Load store options from API
+      try {
+        const response = await fetch('/api/orders/columns')
+        if (response.ok) {
+          const data = await response.json()
+          if (data.stores && Array.isArray(data.stores)) {
+            setStoreOptions(data.stores)
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to load store options:", error)
+      }
       
       // Build indexed maps for performance optimization
       buildIndexedMaps(paymentTablesData, enrichedOrders)
@@ -635,6 +791,8 @@ export default function PaymentReconciliationDashboard() {
         delhivery: [],
         snapmint: [],
         shipway: [],
+        cred_pay: [],
+        india_post: [],
       })
       setReconciliation([])
     } finally {
@@ -710,6 +868,9 @@ export default function PaymentReconciliationDashboard() {
           case "gokwik":
             amount = Number(record.Amount) || 0
             break
+        case "cred_pay":
+          amount = Number(record["Credited Amount"]) || Number(record.Amount) || 0
+          break
           case "shiprocket":
             amount = Number(record.amount) || 0
             break
@@ -746,17 +907,12 @@ export default function PaymentReconciliationDashboard() {
 
     const reconciliationRecords: ReconciliationRecord[] = orders
       .filter((order) => {
-        // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
-        const isExcludedOrder = order.transaction_type === "RTO Delivered" || 
-                               order.transaction_type === "RTO" ||
-                               order.transaction_type === "NDR" ||
-                               order.transaction_type === "FAULT"
-        const isCODPayment = order.payment_method === "COD"
-        return !(isExcludedOrder && isCODPayment)
+        // Removed hidden exclusion: include all orders regardless of payment method and transaction_type
+        return true
       })
       .map((order) => {
-      // Use "Shipping Amount" for order amount
-      const orderAmount = Number(order["Shipping Amount"]) || 0
+      // Use final_amount for order amount calculation
+      const orderAmount = Number(order.final_amount) || 0
       const paymentData = paymentMap.get(order.order_id) || { total: 0, sources: [] }
       const originalPaymentAmount = paymentData.total
       const adjustedAmount = Number(order.adjusted_amount) || 0
@@ -824,7 +980,7 @@ export default function PaymentReconciliationDashboard() {
     const discrepancies = reconciliationToCount.filter((r) => r.status === "discrepancy").length
     const matchedOrders = reconciliationToCount.filter((r) => r.status === "matched").length
     const orphanedOrders = reconciliationToCount.filter((r) => r.status === "orphaned_order").length
-    const totalOrderAmount = ordersToCount.reduce((sum, order) => sum + (Number(order["Shipping Amount"]) || 0), 0)
+    const totalOrderAmount = ordersToCount.reduce((sum, order) => sum + (Number(order.final_amount) || 0), 0)
 
     return {
       totalOrders,
@@ -890,23 +1046,17 @@ export default function PaymentReconciliationDashboard() {
     return reconciliation.filter((record) => {
       const correspondingOrder = ordersIndexMap.get(record.order_id)
 
-      // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
-      if (correspondingOrder) {
-        const isExcludedOrder = correspondingOrder.transaction_type === "RTO Delivered" ||
-                               correspondingOrder.transaction_type === "RTO" ||
-                               correspondingOrder.transaction_type === "NDR" ||
-                               correspondingOrder.transaction_type === "FAULT"
-        const isCODPayment = correspondingOrder.payment_method === "COD"
-        if (isExcludedOrder && isCODPayment) {
-          return false
-        }
-      }
+      // Include SKU in global search (case-insensitive; token and substring match)
+      const skuField = (correspondingOrder?.sku || '').toString().toLowerCase()
+      const normalizedOrderSkus = skuField.split(',').map((s: string) => s.trim()).filter(Boolean)
+      const matchesSku = normalizedOrderSkus.includes(lowerCaseSearchTerm) || skuField.includes(lowerCaseSearchTerm)
 
       const matchesSearchTerm =
         (record.order_id && record.order_id.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
         (record.order_number && record.order_number.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
         (correspondingOrder?.product_name &&
-          correspondingOrder.product_name.toString().toLowerCase().includes(lowerCaseSearchTerm))
+          correspondingOrder.product_name.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
+        matchesSku
 
       const matchesStatus = filterStatus === "all" || record.status === filterStatus
 
@@ -916,54 +1066,449 @@ export default function PaymentReconciliationDashboard() {
         customEndDate,
       )
 
-      let matchesShippingDate = true
-      if (dateRangeStart && dateRangeEnd && record.shipping_date && record.shipping_date !== "N/A") {
-        const recordDate = new Date(record.shipping_date)
-        recordDate.setHours(0, 0, 0, 0)
-        dateRangeStart.setHours(0, 0, 0, 0)
-        dateRangeEnd.setHours(0, 0, 0, 0)
+      let matchesDateFilter = true
+      if (dateRangeStart && dateRangeEnd && correspondingOrder) {
+        let dateToCheck: string | null = null
+        
+        if (filterDateType === "order_date") {
+          dateToCheck = correspondingOrder.order_date
+        } else if (filterDateType === "shipped_date") {
+          dateToCheck = correspondingOrder.shipped_date
+        } else if (filterDateType === "delivered_date") {
+          dateToCheck = correspondingOrder.delivered_date || null
+        } else if (filterDateType === "payment_captured_date") {
+          dateToCheck = correspondingOrder.payment_captured_date || null
+        }
+        
+        if (dateToCheck && dateToCheck !== "N/A") {
+          const recordDate = new Date(dateToCheck)
+          const start = new Date(dateRangeStart)
+          const end = new Date(dateRangeEnd)
+          start.setHours(0, 0, 0, 0)
+          end.setHours(23, 59, 59, 999)
 
-        matchesShippingDate = recordDate >= dateRangeStart && recordDate <= dateRangeEnd
-      } else if (filterShippingDateType !== "all" && (!record.shipping_date || record.shipping_date === "N/A")) {
-        matchesShippingDate = false
+          matchesDateFilter = recordDate >= start && recordDate <= end
+        } else if (filterShippingDateType !== "all") {
+          matchesDateFilter = false
+        }
+      } else if (filterShippingDateType !== "all") {
+        matchesDateFilter = false
       }
 
-      const matchesPaymentSource = filterPaymentSource === "all" || record.payment_sources.includes(filterPaymentSource)
+      const matchesPaymentSource =
+        filterPaymentSource === "all" ||
+        (correspondingOrder?.payment_source && correspondingOrder.payment_source.toLowerCase().includes(filterPaymentSource.toLowerCase()))
+      
+      const matchesPaymentMethod =
+        filterPaymentMethod.length === 0 ||
+        filterPaymentMethod.includes("all") ||
+        (correspondingOrder?.payment_method &&
+          filterPaymentMethod.some((m) => {
+            const mLc = m.toLowerCase().trim()
+            const orderLc = correspondingOrder.payment_method.toLowerCase().trim()
+            if (mLc === "ppd" || mLc === "prepaid" || mLc === "pre-paid") {
+              return (
+                orderLc.includes("ppd") ||
+                orderLc.includes("prepaid") ||
+                orderLc.includes("pre-paid")
+              )
+            }
+            return orderLc.includes(mLc)
+          }))
 
-      const matchesOrderStatus = filterOrderStatus === "all" || (correspondingOrder?.transaction_type === filterOrderStatus)
+      const matchesOrderStatus = filterOrderStatus === "all" || (correspondingOrder?.transaction_type?.toLowerCase() === filterOrderStatus.toLowerCase())
 
-      return matchesSearchTerm && matchesStatus && matchesShippingDate && matchesPaymentSource && matchesOrderStatus
+      const matchesStore = filterStore === "all" || 
+        (correspondingOrder?.store && 
+         (((correspondingOrder.store || "").trim().toLowerCase()) === filterStore.trim().toLowerCase()))
+
+      return matchesSearchTerm && matchesStatus && matchesDateFilter && matchesPaymentSource && matchesPaymentMethod && matchesOrderStatus && matchesStore
     })
   }, [
     reconciliation,
     ordersIndexMap,
     searchTerm,
     filterStatus,
+    filterDateType,
     filterShippingDateType,
     customStartDate,
     customEndDate,
     filterPaymentSource,
+    filterPaymentMethod,
     filterOrderStatus,
+    filterStore,
   ])
 
   const filteredOrders = useMemo(() => {
     const reconciledOrderIds = new Set(filteredReconciliation.map((record) => record.order_id))
+    const lowerCaseSearchTerm = searchTerm.toLowerCase()
+
+    const { start: dateRangeStart, end: dateRangeEnd } = getDateRange(
+      filterShippingDateType,
+      customStartDate,
+      customEndDate,
+    )
+
     return orders.filter((order) => {
-      // Exclude RTO/RTO Delivered/NDR/FAULT orders with COD payment method
-      const isExcludedOrder = order.transaction_type === "RTO Delivered" ||
-                             order.transaction_type === "RTO" ||
-                             order.transaction_type === "NDR" ||
-                             order.transaction_type === "FAULT"
-      const isCODPayment = order.payment_method === "COD"
-      if (isExcludedOrder && isCODPayment) {
-        return false
+
+      // Search filter (include SKU)
+      const skuField = (order.sku || '').toString().toLowerCase()
+      const normalizedOrderSkus = skuField.split(',').map((s: string) => s.trim()).filter(Boolean)
+      const matchesSku = normalizedOrderSkus.includes(lowerCaseSearchTerm) || skuField.includes(lowerCaseSearchTerm)
+
+      const matchesSearchTerm =
+        (order.order_id && order.order_id.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
+        (order.order_number && order.order_number.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
+        (order.product_name && order.product_name.toString().toLowerCase().includes(lowerCaseSearchTerm)) ||
+        matchesSku
+
+      const matchesPaymentSource = filterPaymentSource === "all" || (order.payment_source && order.payment_source.toLowerCase().includes(filterPaymentSource.toLowerCase()))
+
+      // Payment method filter
+      const matchesPaymentMethod =
+        filterPaymentMethod.length === 0 ||
+        filterPaymentMethod.includes("all") ||
+        (order.payment_method &&
+          filterPaymentMethod.some((m) => {
+            const mLc = m.toLowerCase().trim()
+            const orderLc = order.payment_method.toLowerCase().trim()
+            if (mLc === "ppd" || mLc === "prepaid" || mLc === "pre-paid") {
+              return (
+                orderLc.includes("ppd") ||
+                orderLc.includes("prepaid") ||
+                orderLc.includes("pre-paid")
+              )
+            }
+            return orderLc.includes(mLc)
+          }))
+
+      // Order status filter
+      const matchesOrderStatus =
+        filterOrderStatus === "all" || order.transaction_type?.toLowerCase() === filterOrderStatus.toLowerCase()
+
+      // Date range filter
+      let matchesDateFilter = true
+      if (dateRangeStart && dateRangeEnd) {
+        let dateToCheck: string | null = null
+        if (filterDateType === "order_date") {
+          dateToCheck = order.order_date
+        } else if (filterDateType === "shipped_date") {
+          dateToCheck = order.shipped_date
+        } else if (filterDateType === "delivered_date") {
+          dateToCheck = order.delivered_date || null
+        } else if (filterDateType === "payment_captured_date") {
+          dateToCheck = order.payment_captured_date || null
+        }
+
+        if (dateToCheck && dateToCheck !== "N/A") {
+          const recordDate = new Date(dateToCheck)
+          const start = new Date(dateRangeStart)
+          const end = new Date(dateRangeEnd)
+          start.setHours(0, 0, 0, 0)
+          end.setHours(23, 59, 59, 999)
+          matchesDateFilter = recordDate >= start && recordDate <= end
+        } else if (filterShippingDateType !== "all") {
+          matchesDateFilter = false
+        }
+      } else if (filterShippingDateType !== "all") {
+        matchesDateFilter = false
       }
 
-      const matchesReconciliation = reconciledOrderIds.has(order.order_id)
-      const matchesOrderStatus = filterOrderStatus === "all" || order.transaction_type === filterOrderStatus
-      return matchesReconciliation && matchesOrderStatus
+      // Store filter
+      const matchesStore =
+        filterStore === "all" ||
+        (((order.store || "").trim().toLowerCase()) === filterStore.trim().toLowerCase())
+
+      // Reconciliation status filter (only when not "all")
+      const matchesReconciliation = filterStatus === "all" ? true : reconciledOrderIds.has(order.order_id)
+
+      return (
+        matchesSearchTerm &&
+        matchesPaymentSource &&
+        matchesPaymentMethod &&
+        matchesOrderStatus &&
+        matchesDateFilter &&
+        matchesStore &&
+        matchesReconciliation
+      )
     })
-  }, [orders, filteredReconciliation, filterOrderStatus])
+  }, [
+    orders,
+    filteredReconciliation,
+    filterStatus,
+    filterPaymentSource,
+    filterPaymentMethod,
+    filterOrderStatus,
+    filterStore,
+    filterDateType,
+    filterShippingDateType,
+    customStartDate,
+    customEndDate,
+    searchTerm,
+  ])
+
+  // Removed Inventory: filteredOrdersForInventory
+
+  // Removed Inventory: ordersMatchingSkuSearch
+
+  // Inventory: dynamically group by all SKUs found in filtered orders; count each order once per matched SKU
+  // Re-introduced Inventory: inventoryGrouped
+  const ordersBySku = useMemo(() => {
+    const map = new Map<string, Order[]>()
+    const uniqueBySkuOrderId = new Map<string, Set<string>>()
+
+    filteredOrders.forEach((order) => {
+      const skuField = (order.sku || '').toString().toLowerCase()
+      const normalizedOrderSkus = skuField.split(',').map((s: string) => s.trim()).filter(Boolean)
+
+      normalizedOrderSkus.forEach((sku: string) => {
+        if (!map.has(sku)) {
+          map.set(sku, [])
+          uniqueBySkuOrderId.set(sku, new Set<string>())
+        }
+        const uniqSet = uniqueBySkuOrderId.get(sku)!
+        if (!uniqSet.has(order.order_id)) {
+          map.get(sku)!.push(order)
+          uniqSet.add(order.order_id)
+        }
+      })
+    })
+
+    return map
+  }, [filteredOrders])
+
+  // Filter Credit Notes using global filters connected via Orders
+  const filteredCreditNotes = useMemo(() => {
+    const lowerCaseSearchTerm = searchTerm.toLowerCase().trim()
+
+    const { start: dateRangeStart, end: dateRangeEnd } = getDateRange(
+      filterShippingDateType,
+      customStartDate,
+      customEndDate,
+    )
+
+    return creditNotes.filter((note: any) => {
+      // Find corresponding order by order_id first, fallback to order_number
+      const orderKey = note.order_id || null
+      const orderNumberKey = note.order_number || null
+      const correspondingOrder = (orderKey && ordersIndexMap.get(orderKey))
+        || (orderNumberKey && ordersNumberIndexMap.get(orderNumberKey))
+        || null
+
+      // Global search (search within note values)
+      const matchesSearchTerm = !lowerCaseSearchTerm
+        || Object.values(note).some((val) => String(val ?? '').toLowerCase().includes(lowerCaseSearchTerm))
+
+      // Date range filter using selected order date type
+      let matchesDateFilter = true
+      if (dateRangeStart && dateRangeEnd) {
+        let dateToCheck: string | null = null
+        if (correspondingOrder) {
+          if (filterDateType === "order_date") {
+            dateToCheck = correspondingOrder.order_date
+          } else if (filterDateType === "shipped_date") {
+            dateToCheck = correspondingOrder.shipped_date
+          } else if (filterDateType === "delivered_date") {
+            dateToCheck = correspondingOrder.delivered_date || null
+          } else if (filterDateType === "payment_captured_date") {
+            dateToCheck = correspondingOrder.payment_captured_date || null
+          }
+        }
+
+        if (dateToCheck && dateToCheck !== "N/A") {
+          const recordDate = new Date(dateToCheck)
+          const start = new Date(dateRangeStart)
+          const end = new Date(dateRangeEnd)
+          start.setHours(0, 0, 0, 0)
+          end.setHours(23, 59, 59, 999)
+          matchesDateFilter = recordDate >= start && recordDate <= end
+        } else if (filterShippingDateType !== "all") {
+          matchesDateFilter = false
+        }
+      } else if (filterShippingDateType !== "all") {
+        matchesDateFilter = false
+      }
+
+      // Store filter via connected order
+      const matchesStore = filterStore === "all" || (
+        correspondingOrder?.store && (((correspondingOrder.store || "").trim().toLowerCase()) === filterStore.trim().toLowerCase())
+      )
+
+      // Payment source filter via connected order
+      const matchesPaymentSource =
+        filterPaymentSource === "all" ||
+        (correspondingOrder?.payment_source && correspondingOrder.payment_source.toLowerCase().includes(filterPaymentSource.toLowerCase()))
+
+      // Payment method filter via connected order
+      const matchesPaymentMethod =
+        filterPaymentMethod.length === 0 ||
+        filterPaymentMethod.includes("all") ||
+        (correspondingOrder?.payment_method &&
+          filterPaymentMethod.some((m) => {
+            const mLc = m.toLowerCase().trim()
+            const orderLc = correspondingOrder.payment_method.toLowerCase().trim()
+            if (mLc === "ppd" || mLc === "prepaid" || mLc === "pre-paid") {
+              return (
+                orderLc.includes("ppd") ||
+                orderLc.includes("prepaid") ||
+                orderLc.includes("pre-paid")
+              )
+            }
+            return orderLc.includes(mLc)
+          }))
+
+      // Order status filter via connected order
+      const matchesOrderStatus =
+        filterOrderStatus === "all" || (correspondingOrder?.transaction_type?.toLowerCase() === filterOrderStatus.toLowerCase())
+
+      return (
+        matchesSearchTerm &&
+        matchesDateFilter &&
+        matchesStore &&
+        matchesPaymentSource &&
+        matchesPaymentMethod &&
+        matchesOrderStatus
+      )
+    })
+  }, [
+    creditNotes,
+    searchTerm,
+    ordersIndexMap,
+    ordersNumberIndexMap,
+    filterStore,
+    filterDateType,
+    filterShippingDateType,
+    customStartDate,
+    customEndDate,
+    filterPaymentSource,
+    filterPaymentMethod,
+    filterOrderStatus,
+  ])
+
+  // Credit Notes -> Scan In quantity per SKU (via linked orders)
+  const creditNotesQtyBySku = useMemo(() => {
+    const map = new Map<string, number>()
+    filteredCreditNotes.forEach((note: any) => {
+      const orderKey = note.order_id || null
+      const orderNumberKey = note.order_number || null
+      const correspondingOrder = (orderKey && ordersIndexMap.get(orderKey))
+        || (orderNumberKey && ordersNumberIndexMap.get(orderNumberKey))
+        || null
+      if (!correspondingOrder) return
+
+      const skuField = (correspondingOrder.sku || '').toString().toLowerCase()
+      const normalizedOrderSkus = skuField.split(',').map((s: string) => s.trim()).filter(Boolean)
+      // Count occurrences of each SKU within this order and add to scan-in
+      const counts: Record<string, number> = {}
+      normalizedOrderSkus.forEach((s: string) => {
+        counts[s] = (counts[s] || 0) + 1
+      })
+      Object.entries(counts).forEach(([sku, count]) => {
+        map.set(sku, (map.get(sku) || 0) + count)
+      })
+    })
+    return map
+  }, [filteredCreditNotes, ordersIndexMap, ordersNumberIndexMap])
+
+  // Scan Out -> count occurrences of each SKU across filtered orders
+  const skuOccurrenceCountBySku = useMemo(() => {
+    const map = new Map<string, number>()
+    filteredOrders.forEach((order) => {
+      const skuField = (order.sku || '').toString().toLowerCase()
+      const normalizedOrderSkus = skuField
+        .split(',')
+        .map((s: string) => s.trim())
+        .filter(Boolean)
+      const counts: Record<string, number> = {}
+      normalizedOrderSkus.forEach((s: string) => {
+        counts[s] = (counts[s] || 0) + 1
+      })
+      Object.entries(counts).forEach(([sku, count]) => {
+        map.set(sku, (map.get(sku) || 0) + count)
+      })
+    })
+    return map
+  }, [filteredOrders])
+
+  const inventoryGrouped = useMemo(() => {
+    const rows: {
+      sku: string
+      product_name: string
+      totalOrders: number
+      totalQuantity: number
+      scanOutQty: number
+      scanInQty: number
+      netQty: number
+      totalRevenue: number
+      latestShippedDate: string | null
+      orders: Order[]
+    }[] = []
+
+    ordersBySku.forEach((ordersForSku, sku) => {
+      const totalOrders = ordersForSku.length
+      const totalQuantity = ordersForSku.reduce((sum, o) => sum + (o.quantity || 0), 0)
+      // Scan-out should count this specific SKU occurrences, not total order quantity
+      const scanOutQty = skuOccurrenceCountBySku.get(sku) || 0
+      const scanInQty = creditNotesQtyBySku.get(sku) || 0
+      const netQty = scanOutQty - scanInQty
+      const totalRevenue = ordersForSku.reduce((sum, o) => sum + (Number(o.final_amount) || 0), 0)
+      const product_name = ordersForSku[0]?.product_name || 'N/A'
+      // Compute latest shipped date
+      const validDates = ordersForSku
+        .map((o) => o.shipped_date)
+        .filter((d) => d && d !== 'N/A')
+        .map((d) => new Date(d as string))
+        .filter((d) => !isNaN(d.getTime()))
+      const latestShippedDate = validDates.length
+        ? new Date(Math.max(...validDates.map((d) => d.getTime()))).toISOString()
+        : null
+
+      rows.push({
+        sku,
+        product_name,
+        totalOrders,
+        totalQuantity,
+        scanOutQty,
+        scanInQty,
+        netQty,
+        totalRevenue,
+        latestShippedDate,
+        orders: ordersForSku,
+      })
+    })
+
+    const term = inventorySearchTerm.toLowerCase().trim()
+    const filteredRows = term ? rows.filter((r) => (r.sku || '').toLowerCase().includes(term)) : rows
+    filteredRows.sort((a, b) => b.totalOrders - a.totalOrders)
+    return filteredRows
+  }, [ordersBySku, inventorySearchTerm, creditNotesQtyBySku])
+
+  // Re-introduced Inventory: ordersBySku (defined above)
+
+  // Re-introduced Inventory: paginatedInventory
+  const paginatedInventory = useMemo(() => {
+    const start = (inventoryPage - 1) * itemsPerPage
+    const end = start + itemsPerPage
+    return inventoryGrouped.slice(start, end)
+  }, [inventoryGrouped, inventoryPage, itemsPerPage])
+
+  // Re-introduced Inventory: expandedSkus reset
+  useEffect(() => {
+    setInventoryPage(1)
+    setExpandedSkus(new Set())
+  }, [
+    searchTerm,
+    filterStatus,
+    filterPaymentSource,
+    filterPaymentMethod,
+    filterOrderStatus,
+    filterStore,
+    filterDateType,
+    filterShippingDateType,
+    customStartDate,
+    customEndDate,
+    inventorySearchTerm,
+  ])
 
   const filteredPaymentTables = useMemo(() => {
     const reconciledOrderIds = new Set(filteredReconciliation.map((record) => record.order_id))
@@ -976,6 +1521,8 @@ export default function PaymentReconciliationDashboard() {
       delhivery: [],
       snapmint: [],
       shipway: [],
+      cred_pay: [],
+      india_post: [],
     }
 
     Object.entries(paymentTables).forEach(([tableName, tableData]) => {
@@ -986,8 +1533,18 @@ export default function PaymentReconciliationDashboard() {
     return newFilteredPaymentTables
   }, [paymentTables, filteredReconciliation])
 
+
+  // Dynamic headers for Credit Notes table based on filtered data
+  const creditNotesHeaders = useMemo(() => {
+    const headers = new Set<string>()
+    filteredCreditNotes.forEach((note: any) => {
+      Object.keys(note || {}).forEach((k) => headers.add(k))
+    })
+    return Array.from(headers)
+  }, [filteredCreditNotes])
+
   // Pagination utility functions
-  const getPaginatedData = <T,>(data: T[], page: number, itemsPerPage: number) => {
+  function getPaginatedData<T>(data: T[], page: number, itemsPerPage: number) {
     const startIndex = (page - 1) * itemsPerPage
     const endIndex = startIndex + itemsPerPage
     return data.slice(startIndex, endIndex)
@@ -1006,6 +1563,10 @@ export default function PaymentReconciliationDashboard() {
     return getPaginatedData(filteredOrders, ordersPage, itemsPerPage)
   }, [filteredOrders, ordersPage, itemsPerPage])
 
+  const paginatedCreditNotes = useMemo(() => {
+    return getPaginatedData(filteredCreditNotes, creditNotesPage, itemsPerPage)
+  }, [filteredCreditNotes, creditNotesPage, itemsPerPage])
+
   const paginatedPaymentTables = useMemo(() => {
     const result: PaymentTableData = {
       razorpay: [],
@@ -1016,6 +1577,8 @@ export default function PaymentReconciliationDashboard() {
       delhivery: [],
       snapmint: [],
       shipway: [],
+      cred_pay: [],
+      india_post: [],
     }
 
     Object.entries(filteredPaymentTables).forEach(([tableName, tableData]) => {
@@ -1030,6 +1593,7 @@ export default function PaymentReconciliationDashboard() {
   useEffect(() => {
     setReconciliationPage(1)
     setOrdersPage(1)
+    setCreditNotesPage(1)
     setPaymentTabPages({
       razorpay: 1,
       gokwik: 1,
@@ -1040,7 +1604,7 @@ export default function PaymentReconciliationDashboard() {
       delhivery: 1,
       shipway: 1
     })
-  }, [searchTerm, filterStatus, filterShippingDateType, customStartDate, customEndDate, filterPaymentSource, filterOrderStatus])
+  }, [searchTerm, filterStatus, filterDateType, filterShippingDateType, customStartDate, customEndDate, filterPaymentSource, filterPaymentMethod, filterOrderStatus])
 
   useEffect(() => {
     // Performance optimization: Debounce stats calculation to avoid blocking UI
@@ -1219,42 +1783,78 @@ export default function PaymentReconciliationDashboard() {
 
     switch (activeMainTab) {
       case "reconciliation":
-        dataToExport = filteredReconciliation.map((record) => ({
-          "Order Number": record.order_number || "N/A",
-          "Order Amount": record.order_amount.toFixed(2),
-          "Received Amount": record.payment_amount.toFixed(2),
-          "Original Payment Amount": record.original_payment_amount.toFixed(2),
-          Difference: record.difference.toFixed(2),
-          "Adjusted Amount": (record.adjusted_amount || 0).toFixed(2),
-          Remark: record.remark || "",
-          "Payment Sources": record.payment_sources.join(", "),
-          "Shipping Date": formatDateForDisplay(record.shipping_date),
-          Status: record.status,
-        }))
+        dataToExport = filteredReconciliation.map((record) => {
+          const correspondingOrder = ordersIndexMap.get(record.order_id)
+          return {
+            "Order Number": record.order_number || "N/A",
+            "Store": correspondingOrder?.store || "N/A",
+            "Order Amount": record.order_amount.toFixed(2),
+            "Received Amount": record.payment_amount.toFixed(2),
+            "Original Payment Amount": record.original_payment_amount.toFixed(2),
+            Difference: record.difference.toFixed(2),
+            "Adjusted Amount": (record.adjusted_amount || 0).toFixed(2),
+            Remark: record.remark || "",
+            "Payment Sources": record.payment_sources.join(", "),
+            "Shipping Date": formatDateForDisplay(record.shipping_date),
+            Status: record.status,
+          }
+        })
         filename = "reconciliation_data.csv"
         break
       case "orders":
-        dataToExport = filteredOrders.map((order) => ({
-          "Order Number": order.order_number,
-          Product: order.product_name || "N/A",
-          Quantity: order.quantity || 0,
-          "Final Amount": (order["Shipping Amount"] || 0).toFixed(2),
-          "Payment Method": order.payment_method || "N/A",
-          "Shipping Partner": order.shipping_partner || "N/A",
-          State: order.state || "N/A",
-          "Order Date": formatDateForDisplay(order.order_date),
-          "Shipping Date": formatDateForDisplay(order.shipped_date),
-          "Adjusted Amount": (order.adjusted_amount || 0).toFixed(2),
-          Remark: order.remark || "",
-        }))
+        dataToExport = filteredOrders.map((order) => {
+          // Find corresponding reconciliation record for payment info
+          const reconciliationRecord = filteredReconciliation.find(r => r.order_id === order.order_id)
+          
+          return {
+            "Order ID": order.order_id,
+            "Order Number": order.order_number,
+            "Store": order.store || "N/A",
+            "Shipped Order Number": order.shipped_order_number || "N/A",
+            "Transaction Type": order.transaction_type || "N/A",
+            Product: order.product_name || "N/A",
+            Quantity: order.quantity || 0,
+            "Final Amount": (order.final_amount || 0).toFixed(2),
+            "Prepaid Amount": (order.prepaid_amount || 0).toFixed(2),
+            "COD Amount": (order.cod_amount || 0).toFixed(2),
+            "Shipping Amount": (order.shipping_amount || 0).toFixed(2),
+            "Payment Method": order.payment_method || "N/A",
+            "Payment Source": order.payment_source || "N/A",
+            "Shipping Partner": order.shipping_partner || "N/A",
+            State: order.state || "N/A",
+            "Customer Name": order.customer_name || "N/A",
+            "SKU": order.sku || "N/A",
+            "HSN Code": order.hsn_code || "N/A",
+            "IGST": order.igst ? order.igst.toFixed(2) : "0.00",
+            "Order Date": formatDateForDisplay(order.order_date),
+            "Shipping Date": formatDateForDisplay(order.shipped_date),
+            "Delivered Date": formatDateForDisplay(order.delivered_date),
+            "Payment Date": formatDateForDisplay(order.payment_captured_date),
+            "Adjusted Amount": (order.adjusted_amount || 0).toFixed(2),
+            Remark: order.remark || "",
+            // Additional reconciliation columns
+            "Payment Sources (Matched)": reconciliationRecord?.payment_sources.join(", ") || "N/A",
+            "Received Amount": reconciliationRecord ? reconciliationRecord.payment_amount.toFixed(2) : "0.00",
+            "Match Status": reconciliationRecord?.status || "no_payment",
+            "Payment Difference": reconciliationRecord ? reconciliationRecord.difference.toFixed(2) : "N/A",
+          }
+        })
         filename = "orders_data.csv"
         break
-      case "payments":
+      case "payments": {
         const currentPaymentTableData = filteredPaymentTables[activePaymentTab as keyof PaymentTableData]
         dataToExport = currentPaymentTableData.map((record) => {
+          // Use the same amount field logic as the UI display
+          const amount =
+            activePaymentTab === "snapmint" || activePaymentTab === "shipway"
+              ? record["Order Value"] || 0
+              : activePaymentTab === "cred_pay" || activePaymentTab === "india_post"
+                ? record["Credited Amount"] || record.Amount || 0
+                : record.amount || record.Amount || record.cod_amount || record.shipping_charges || 0
+
           const baseRecord = {
             "Order ID": record.order_id || "N/A",
-            Amount: (record.amount || record.Amount || record.cod_amount || record.shipping_charges || 0).toFixed(2),
+            Amount: amount.toFixed(2),
             Date: formatDateForDisplay(
               record.createdAt ||
                 record["Transaction Date"] ||
@@ -1268,8 +1868,29 @@ export default function PaymentReconciliationDashboard() {
           if (activePaymentTab === "razorpay" || activePaymentTab === "gokwik" || activePaymentTab === "snapmint") {
             return {
               ...baseRecord,
-              "Payment ID": record.payment_id || record["Payment Id"] || "N/A",
-              Method: record.method || record["Payment Method"] || "N/A",
+              "Payment ID": activePaymentTab === "snapmint" 
+                ? record["Payment ID"] || "N/A"
+                : record.payment_id || record["Payment Id"] || "N/A",
+              Method: activePaymentTab === "snapmint"
+                ? record["Order Number"] || "N/A"
+                : record.method || record["Payment Method"] || "N/A",
+            }
+          } else if (activePaymentTab === "cred_pay") {
+            return {
+              ...baseRecord,
+              "Payment ID": record["Payment ID"] || 'N/A',
+              Method: record.payment_method || 'N/A',
+              "Settlement_Time": record.Settlement_Time || 'N/A',
+              "Order Number": record["Order Number"] || 'N/A',
+              "Settlement_Id": record.Settlement_Id || 'N/A',
+              "Settlement_Utr": record.Settlement_Utr || 'N/A',
+            }
+          } else if (activePaymentTab === "india_post") {
+            return {
+              ...baseRecord,
+              AWB: record.AWB || 'N/A',
+              "Cheque Number": record["Cheque Number"] || 'N/A',
+              "Order Number": record["Order Number"] || 'N/A',
             }
           } else {
             return {
@@ -1278,11 +1899,32 @@ export default function PaymentReconciliationDashboard() {
               "Courier/Status":
                 activePaymentTab === "bluedart"
                   ? record.order_number || "N/A"
-                  : record.courier || record.status || record.carrier || "N/A",
+                  : activePaymentTab === "shipway"
+                    ? record.order_id || "N/A"
+                    : record.courier || record.status || record.carrier || "N/A",
             }
           }
         })
         filename = `${activePaymentTab}_payments_data.csv`
+        break
+      }
+      case "credit_notes":
+        dataToExport = filteredCreditNotes.map((note: any) => ({ ...note }))
+        filename = "credit_notes.csv"
+        break
+      case "inventory":
+        dataToExport = inventoryGrouped.map((row) => ({
+          SKU: row.sku,
+          Product: row.product_name,
+          "Total Orders": row.totalOrders,
+          "Total Quantity": row.totalQuantity,
+          "Scaned Out": row.scanOutQty,
+          "Scaned In": row.scanInQty,
+          "Net Qty": row.netQty,
+          "Total Revenue": row.totalRevenue.toFixed(2),
+          "Latest Shipped Date": formatDateForDisplay(row.latestShippedDate),
+        }))
+        filename = "inventory_summary.csv"
         break
       default:
         console.warn("No active tab selected for CSV download.")
@@ -1453,13 +2095,13 @@ export default function PaymentReconciliationDashboard() {
         </div>
 
         <div className="flex flex-col sm:flex-row items-center space-y-2 sm:space-y-0 sm:space-x-2">
-          <div className="relative flex-1 max-w-sm w-full sm:w-auto">
-            <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+          <div className="relative flex-1 max-w-md w-full sm:w-auto">
+            <Search className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
             <Input
               placeholder="Search orders, products..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-8"
+              className="pl-10 py-3 text-base font-medium min-w-[300px] focus:ring-2 focus:ring-blue-500 transition-all duration-200"
             />
           </div>
           <Select value={filterStatus} onValueChange={setFilterStatus}>
@@ -1502,6 +2144,91 @@ export default function PaymentReconciliationDashboard() {
               <SelectItem value="IN-TRANSIT">IN-TRANSIT</SelectItem>
             </SelectContent>
           </Select>
+          <Select value={filterStore} onValueChange={setFilterStore}>
+            <SelectTrigger className="w-full sm:w-[180px]">
+              <SelectValue placeholder="Filter by Store" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Stores</SelectItem>
+              {storeOptions.map((store) => (
+                <SelectItem key={store} value={store}>
+                  {store}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div className="relative">
+            <Select>
+              <SelectTrigger className="w-full sm:w-[200px]">
+                <SelectValue placeholder={
+                  filterPaymentMethod.length === 0
+                    ? "Select Payment Methods"
+                    : filterPaymentMethod.includes("all") 
+                      ? "All Payment Methods" 
+                      : filterPaymentMethod.length === 1 
+                        ? filterPaymentMethod[0]
+                        : `${filterPaymentMethod.length} selected`
+                } />
+                <ChevronDown className="h-4 w-4 opacity-50" />
+              </SelectTrigger>
+              <SelectContent>
+                <div className="flex items-center space-x-2 px-2 py-1.5">
+                  <Checkbox 
+                    id="all-payment-methods"
+                    checked={filterPaymentMethod.includes("all")}
+                    onCheckedChange={() => handlePaymentMethodChange("all")}
+                  />
+                  <label htmlFor="all-payment-methods" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                    All Payment Methods
+                  </label>
+                </div>
+                <div className="flex items-center space-x-2 px-2 py-1.5">
+                  <Checkbox 
+                    id="cod-payment"
+                    checked={filterPaymentMethod.includes("COD") && !filterPaymentMethod.includes("all")}
+                    onCheckedChange={() => handlePaymentMethodChange("COD")}
+                    disabled={filterPaymentMethod.includes("all")}
+                  />
+                  <label htmlFor="cod-payment" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                    COD
+                  </label>
+                </div>
+                <div className="flex items-center space-x-2 px-2 py-1.5">
+                  <Checkbox 
+                    id="pb-cod-payment"
+                    checked={filterPaymentMethod.includes("PB + COD") && !filterPaymentMethod.includes("all")}
+                    onCheckedChange={() => handlePaymentMethodChange("PB + COD")}
+                    disabled={filterPaymentMethod.includes("all")}
+                  />
+                  <label htmlFor="pb-cod-payment" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                    PB + COD
+                  </label>
+                </div>
+                <div className="flex items-center space-x-2 px-2 py-1.5">
+                  <Checkbox 
+                    id="ppd-payment"
+                    checked={filterPaymentMethod.includes("PPD") && !filterPaymentMethod.includes("all")}
+                    onCheckedChange={() => handlePaymentMethodChange("PPD")}
+                    disabled={filterPaymentMethod.includes("all")}
+                  />
+                  <label htmlFor="ppd-payment" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                    PPD
+                  </label>
+                </div>
+              </SelectContent>
+            </Select>
+          </div>
+          <Select value={filterDateType} onValueChange={(value: string) => setFilterDateType(value as "order_date" | "shipped_date" | "delivered_date" | "payment_captured_date")}>
+            <SelectTrigger className="w-full sm:w-[180px]">
+              <SelectValue placeholder="Filter by Date Type" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="order_date">Order Date</SelectItem>
+              <SelectItem value="shipped_date">Shipped Date</SelectItem>
+              <SelectItem value="delivered_date">Delivered Date</SelectItem>
+              <SelectItem value="payment_captured_date">Payment Date</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={filterShippingDateType} onValueChange={(value: string) => setFilterShippingDateType(value as "all" | "current_month" | "last_month" | "last_quarter" | "custom_range")}>
             <SelectTrigger className="w-full sm:w-[180px]">
               <SelectValue placeholder="Filter by Shipping Date" />
@@ -1538,11 +2265,13 @@ export default function PaymentReconciliationDashboard() {
           </Button>
         </div>
 
-        <Tabs defaultValue="reconciliation" className="space-y-4" onValueChange={setActiveMainTab}>
-          <TabsList className="grid w-full grid-cols-3">
+        <Tabs defaultValue="reconciliation" className="space-y-4" onValueChange={(val) => { setActiveMainTab(val); }}>
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
             <TabsTrigger value="orders">Orders</TabsTrigger>
             <TabsTrigger value="payments">Payment Tables</TabsTrigger>
+            <TabsTrigger value="credit_notes">Credit Notes ({filteredCreditNotes.length})</TabsTrigger>
+            <TabsTrigger value="inventory">Inventory ({inventoryGrouped.length})</TabsTrigger>
           </TabsList>
 
           <TabsContent value="reconciliation">
@@ -1561,6 +2290,7 @@ export default function PaymentReconciliationDashboard() {
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-[140px]">Order Number</TableHead>
+                          <TableHead className="w-[120px]">Store</TableHead>
                           <TableHead className="w-[120px] text-right">Order Amount</TableHead>
                           <TableHead className="w-[120px] text-right">Received Amount</TableHead>
                           <TableHead className="w-[100px] text-right">Difference</TableHead>
@@ -1576,9 +2306,9 @@ export default function PaymentReconciliationDashboard() {
                     <div className="overflow-y-auto max-h-[450px]">
                       <Table>
                         <TableBody>
-                          {paginatedReconciliation.map((record) => (
+                          {paginatedReconciliation.map((record, index) => (
                             <ReconciliationTableRow
-                              key={record.order_id}
+                              key={`${record.order_id || record.order_number}-${record.shipping_date}-${index}`}
                               record={record}
                               editingRecord={editingRecord}
                               editValues={editValues}
@@ -1592,6 +2322,7 @@ export default function PaymentReconciliationDashboard() {
                               formatDateForDisplay={formatDateForDisplay}
                               getStatusBadge={getStatusBadge}
                               originalAdjustedAmount={originalAdjustedAmount}
+                              ordersIndexMap={ordersIndexMap}
                             />
                           ))}
                         </TableBody>
@@ -1606,6 +2337,246 @@ export default function PaymentReconciliationDashboard() {
                     />
                   </div>
                 </div>
+
+{/* moved SKU Dialog to Inventory tab */}
+
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="credit_notes">
+            <Card className="shadow-sm">
+              <CardHeader>
+                <CardTitle>Credit Notes</CardTitle>
+                <CardDescription>List of credit notes with global search and pagination</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <div className="min-w-[2000px]">
+                    <div className="overflow-y-auto max-h-[450px]">
+                      <Table className="w-max min-w-[2000px] table-auto">
+                        <TableHeader>
+                          <TableRow>
+                            {creditNotesHeaders.map((h) => (
+                              <TableHead key={h} className="whitespace-nowrap px-3 py-2 text-sm">{h}</TableHead>
+                            ))}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {paginatedCreditNotes.map((note: any, idx: number) => (
+                            <TableRow key={note.id ?? idx}>
+                              {creditNotesHeaders.map((h) => (
+                                <TableCell key={h} className="whitespace-nowrap px-3 py-2 text-sm">
+                                  {String((note as any)[h] ?? 'N/A')}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                </div>
+
+                <PaginationControls
+                  currentPage={creditNotesPage}
+                  totalItems={filteredCreditNotes.length}
+                  itemsPerPage={itemsPerPage}
+                  onPageChange={setCreditNotesPage}
+                  label="credit notes"
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="inventory">
+            <Card className="shadow-sm">
+              <CardHeader>
+                <CardTitle>Inventory</CardTitle>
+                <CardDescription>SKU-wise summary from filtered orders with drilldown</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="relative w-full max-w-md">
+                    <Search className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
+                    <Input
+                      placeholder="Search SKU..."
+                      value={inventorySearchTerm}
+                      onChange={(e) => setInventorySearchTerm(e.target.value)}
+                      className="pl-10 py-3 text-base font-medium min-w-[280px]"
+                    />
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <div className="min-w-[1000px]">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[200px]">SKU</TableHead>
+                          <TableHead className="w-[240px]">Product</TableHead>
+                          <TableHead className="w-[140px] text-right">Total Orders</TableHead>
+                          <TableHead className="w-[140px] text-right">Scaned Out</TableHead>
+                          <TableHead className="w-[140px] text-right">Scaned In</TableHead>
+                          <TableHead className="w-[140px] text-right">Net Qty</TableHead>
+                          
+                        </TableRow>
+                      </TableHeader>
+                    </Table>
+                    <div className="overflow-y-auto max-h-[450px]">
+                      <Table>
+                        <TableBody>
+                          {paginatedInventory.map((row) => {
+                            const isExpanded = expandedSkus.has(row.sku)
+                            return (
+                              <React.Fragment key={row.sku}>
+                                <TableRow
+                                  onClick={() => {
+                                    setSelectedSku(row.sku)
+                                    setSelectedSkuOrders(row.orders)
+                                    setIsSkuDialogOpen(true)
+                                  }}
+                                  className="cursor-pointer"
+                                >
+                                  <TableCell className="w-[200px] font-mono">{row.sku || 'N/A'}</TableCell>
+                                  <TableCell className="w-[240px]">{row.product_name}</TableCell>
+                                  <TableCell className="w-[140px] text-right">{row.totalOrders}</TableCell>
+                                  <TableCell className="w-[140px] text-right">{row.scanOutQty}</TableCell>
+                                  <TableCell className="w-[140px] text-right">{row.scanInQty}</TableCell>
+                                  <TableCell className="w-[140px] text-right">{row.netQty}</TableCell>
+                                  
+                                </TableRow>
+                                {isExpanded && (
+                                  <TableRow>
+                                    <TableCell colSpan={6}>
+                                      <div className="bg-muted/20 rounded-md p-3">
+                                        <div className="overflow-x-auto">
+                                          <div className="min-w-[900px]">
+                                            <Table>
+                                              <TableHeader>
+                                                <TableRow>
+                                                  <TableHead className="w-[140px]">Order Number</TableHead>
+                                                  <TableHead className="w-[120px]">Store</TableHead>
+                                                  <TableHead className="w-[200px]">Product</TableHead>
+                                                  <TableHead className="w-[100px] text-right">Qty</TableHead>
+                                                  <TableHead className="w-[140px] text-right">Amount</TableHead>
+                                                  <TableHead className="w-[160px]">Shipping Partner</TableHead>
+                                                  <TableHead className="w-[140px]">Shipped Date</TableHead>
+                                                  <TableHead className="w-[140px]">Order Status</TableHead>
+                                                </TableRow>
+                                              </TableHeader>
+                                              <TableBody>
+                                                {row.orders.map((order) => (
+                                                  <TableRow key={`${order.order_id}-${order.order_number}`}>
+                                                    <TableCell className="w-[140px] font-medium">{order.shipped_order_number || order.order_number}</TableCell>
+                                                    <TableCell className="w-[120px]"><Badge variant="secondary">{order.store || 'N/A'}</Badge></TableCell>
+                                                    <TableCell className="w-[200px]">
+                                                      <div>
+                                                        <div className="font-medium">{order.product_name || 'N/A'}</div>
+                                                        <div className="text-sm text-gray-500">SKU: {order.sku || 'N/A'}</div>
+                                                      </div>
+                                                    </TableCell>
+                                                    <TableCell className="w-[100px] text-right">{order.quantity || 0}</TableCell>
+                                                    <TableCell className="w-[140px] text-right">₹{(order.final_amount || 0).toFixed(2)}</TableCell>
+                                                    <TableCell className="w-[160px]">{order.shipping_partner || 'N/A'}</TableCell>
+                                                    <TableCell className="w-[140px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
+                                                    <TableCell className="w-[140px]">
+                                                      <Badge
+                                                        variant={
+                                                          order.transaction_type === 'DELIVERED' || order.transaction_type === 'RTO Delivered' ? 'default' : 
+                                                          order.transaction_type === 'IN-TRANSIT' || order.transaction_type === 'Scanned' ? 'secondary' : 
+                                                          order.transaction_type === 'FAULT' || order.transaction_type === 'RTO' ? 'destructive' : 
+                                                          'outline'
+                                                        }
+                                                      >
+                                                        {order.transaction_type || 'N/A'}
+                                                      </Badge>
+                                                    </TableCell>
+                                                  </TableRow>
+                                                ))}
+                                              </TableBody>
+                                            </Table>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                              </React.Fragment>
+                            )
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+                    <PaginationControls
+                      currentPage={inventoryPage}
+                      totalItems={inventoryGrouped.length}
+                      itemsPerPage={itemsPerPage}
+                      onPageChange={setInventoryPage}
+                      label="inventory items"
+                    />
+                  </div>
+                </div>
+                {/* SKU Orders Modal */}
+                <Dialog open={isSkuDialogOpen} onOpenChange={setIsSkuDialogOpen}>
+                  <DialogContent className="max-w-4xl">
+                    <DialogHeader>
+                      <DialogTitle>Orders for {selectedSku || ''}</DialogTitle>
+                    </DialogHeader>
+                    <div className="overflow-x-auto">
+                      <div className="min-w-[900px] max-h-[450px] overflow-y-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="w-[160px]">Order Number</TableHead>
+                              <TableHead className="w-[220px]">SKU</TableHead>
+                              <TableHead className="w-[80px] text-right">Qty</TableHead>
+                              <TableHead className="w-[280px]">Product</TableHead>
+                              <TableHead className="w-[140px] text-right">Amount</TableHead>
+                              <TableHead className="w-[140px]">Order Date</TableHead>
+                              <TableHead className="w-[140px]">Shipped Date</TableHead>
+                              <TableHead className="w-[140px]">Delivered Date</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {selectedSkuOrders.map((order) => (
+                              <TableRow key={`${order.order_id}-${order.order_number}`}>
+                                <TableCell className="w-[160px] font-medium">{order.shipped_order_number || order.order_number}</TableCell>
+                                <TableCell className="w-[220px] font-mono">{order.sku || 'N/A'}</TableCell>
+                                <TableCell className="w-[80px] text-right">{order.quantity || 0}</TableCell>
+                                <TableCell className="w-[280px]">{order.product_name || 'N/A'}</TableCell>
+                                <TableCell className="w-[140px] text-right">₹{(order.final_amount || 0).toFixed(2)}</TableCell>
+                                <TableCell className="w-[140px]">{formatDateForDisplay(order.order_date)}</TableCell>
+                                <TableCell className="w-[140px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
+                                <TableCell className="w-[140px]">{formatDateForDisplay(order.delivered_date)}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        onClick={() => {
+                          const data = selectedSkuOrders.map((order) => ({
+                            "Order Number": order.shipped_order_number || order.order_number,
+                            SKU: order.sku || "N/A",
+                            Qty: order.quantity || 0,
+                            Product: order.product_name || "N/A",
+                            Amount: (order.final_amount || 0).toFixed(2),
+                            "Order Date": formatDateForDisplay(order.order_date),
+                            "Shipped Date": formatDateForDisplay(order.shipped_date),
+                            "Delivered Date": formatDateForDisplay(order.delivered_date),
+                          }))
+                          const filename = `orders_${(selectedSku || 'sku').replace(/[^a-zA-Z0-9_-]/g, '')}.csv`
+                          exportToCsv(data, filename)
+                        }}
+                      >
+                        <Download className="mr-2 h-4 w-4" /> Download CSV
+                      </Button>
+                      <Button variant="outline" onClick={() => setIsSkuDialogOpen(false)}>Close</Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
               </CardContent>
             </Card>
           </TabsContent>
@@ -1618,35 +2589,38 @@ export default function PaymentReconciliationDashboard() {
               </CardHeader>
               <CardContent>
                 <div className="overflow-x-auto">
-                  <div className="min-w-[1000px]">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-[140px]">Order Number</TableHead>
-                          <TableHead className="w-[200px]">Product</TableHead>
-                          <TableHead className="w-[120px]">Shipping Amount</TableHead>
-                          <TableHead className="w-[130px]">Payment Method</TableHead>
-                          <TableHead className="w-[140px]">Shipping Partner</TableHead>
-                          <TableHead className="w-[100px]">State</TableHead>
-                          <TableHead className="w-[120px]">Order Status</TableHead>
-                          <TableHead className="w-[120px]">Order Date</TableHead>
-                          <TableHead className="w-[120px]">Shipping Date</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                    </Table>
+                  <div className="min-w-[1400px]">
                     <div className="overflow-y-auto max-h-[450px]">
                       <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="w-[140px]">Order Number</TableHead>
+                            <TableHead className="w-[120px]">Store</TableHead>
+                            <TableHead className="w-[200px]">Product</TableHead>
+                            <TableHead className="w-[120px]">Order Amount</TableHead>
+                            <TableHead className="w-[130px]">Payment Method</TableHead>
+                            <TableHead className="w-[140px]">Shipping Partner</TableHead>
+                            <TableHead className="w-[120px]">Delivered Date</TableHead>
+                            <TableHead className="w-[120px]">Order Status</TableHead>
+                            <TableHead className="w-[120px]">Order Date</TableHead>
+                            <TableHead className="w-[120px]">Shipping Date</TableHead>
+                            <TableHead className="w-[120px]">Payment Date</TableHead>
+                          </TableRow>
+                        </TableHeader>
                         <TableBody>
                           {paginatedOrders.map((order) => (
                             <TableRow key={order.id}>
                               <TableCell className="font-medium w-[140px]">{order.shipped_order_number || order.order_number}</TableCell>
+                              <TableCell className="w-[120px]">
+                                <Badge variant="secondary">{order.store || "N/A"}</Badge>
+                              </TableCell>
                               <TableCell className="w-[200px]">
                                 <div>
                                   <div className="font-medium">{order.product_name || "N/A"}</div>
                                   <div className="text-sm text-gray-500">Qty: {order.quantity || 0}</div>
                                 </div>
                               </TableCell>
-                              <TableCell className="w-[120px]">₹{(order["Shipping Amount"] || 0).toFixed(2)}</TableCell>
+                              <TableCell className="w-[120px]">₹{(order.final_amount || 0).toFixed(2)}</TableCell>
                               <TableCell className="w-[130px]">
                                 <Badge variant="outline">{order.payment_method || "N/A"}</Badge>
                               </TableCell>
@@ -1656,7 +2630,9 @@ export default function PaymentReconciliationDashboard() {
                                   {order.shipping_partner || "N/A"}
                                 </div>
                               </TableCell>
-                              <TableCell className="w-[100px]">{order.state || "N/A"}</TableCell>
+                              <TableCell className="w-[120px]">
+                                {formatDateForDisplay(order.delivered_date)}
+                              </TableCell>
                               <TableCell className="w-[120px]">
                                 <Badge variant={
                                   order.transaction_type === 'DELIVERED' || order.transaction_type === 'RTO Delivered' ? 'default' : 
@@ -1669,6 +2645,7 @@ export default function PaymentReconciliationDashboard() {
                               </TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.order_date)}</TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
+                              <TableCell className="w-[120px]">{formatDateForDisplay(order.payment_captured_date)}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
@@ -1695,7 +2672,7 @@ export default function PaymentReconciliationDashboard() {
               </CardHeader>
               <CardContent>
                 <Tabs value={activePaymentTab} onValueChange={setActivePaymentTab}>
-                  <TabsList className="grid w-full grid-cols-8">
+                  <TabsList className="grid w-full grid-cols-10">
                     <TabsTrigger value="razorpay">Razorpay ({filteredPaymentTables.razorpay.length})</TabsTrigger>
                     <TabsTrigger value="gokwik">GoKwik ({filteredPaymentTables.gokwik.length})</TabsTrigger>
                     <TabsTrigger value="snapmint">Snapmint ({filteredPaymentTables.snapmint.length})</TabsTrigger>
@@ -1704,13 +2681,34 @@ export default function PaymentReconciliationDashboard() {
                     <TabsTrigger value="bluedart">BlueDart ({filteredPaymentTables.bluedart.length})</TabsTrigger>
                     <TabsTrigger value="delhivery">Delhivery ({filteredPaymentTables.delhivery.length})</TabsTrigger>
                     <TabsTrigger value="shipway">Shipway ({filteredPaymentTables.shipway.length})</TabsTrigger>
+                    <TabsTrigger value="cred_pay">Cred Pay ({filteredPaymentTables.cred_pay.length})</TabsTrigger>
+                    <TabsTrigger value="india_post">India Post ({filteredPaymentTables.india_post.length})</TabsTrigger>
                   </TabsList>
 
                   {Object.entries(filteredPaymentTables).map(([tableName, tableData]) => {
-                    const paginatedData = paginatedPaymentTables[tableName as keyof PaymentTableData] || []
+                    let paginatedData = paginatedPaymentTables[tableName as keyof PaymentTableData] || []
                     const currentPage = paymentTabPages[tableName as keyof PaymentTableData] || 1
                     const setCurrentPage = (page: number) => {
                       setPaymentTabPages(prev => ({ ...prev, [tableName]: page }))
+                    }
+                    // Custom sort for cred_pay and india_post
+                    if (tableName === 'cred_pay' || tableName === 'india_post') {
+                      const sortCfg = tableName === 'cred_pay' ? credPaySort : indiaPostSort
+                      const fullData = filteredPaymentTables[tableName as keyof PaymentTableData] || []
+                      const sorted = [...fullData].sort((a: any, b: any) => {
+                        if (sortCfg.key === 'amount') {
+                          const aAmt = Number(a["Credited Amount"]) || Number(a.Amount) || 0
+                          const bAmt = Number(b["Credited Amount"]) || Number(b.Amount) || 0
+                          return sortCfg.dir === 'asc' ? aAmt - bAmt : bAmt - aAmt
+                        } else {
+                          const aDate = new Date(a["Transaction Date"] || a.created_at).getTime() || 0
+                          const bDate = new Date(b["Transaction Date"] || b.created_at).getTime() || 0
+                          return sortCfg.dir === 'asc' ? aDate - bDate : bDate - aDate
+                        }
+                      })
+                      const startIndex = (currentPage - 1) * itemsPerPage
+                      const endIndex = startIndex + itemsPerPage
+                      paginatedData = sorted.slice(startIndex, endIndex)
                     }
                     
                     return (
@@ -1718,7 +2716,7 @@ export default function PaymentReconciliationDashboard() {
                         <div className="space-y-4">
                           <div className="flex items-center justify-between">
                             <h3 className="text-lg font-semibold capitalize flex items-center gap-2">
-                              {["shiprocket", "nimbus", "bluedart", "delhivery"].includes(tableName) ? (
+                              {["shiprocket", "nimbus", "bluedart", "delhivery", "india_post"].includes(tableName) ? (
                                 <Package className="h-5 w-5" />
                               ) : (
                                 <DollarSign className="h-5 w-5" />
@@ -1774,60 +2772,78 @@ export default function PaymentReconciliationDashboard() {
                                       <Table>
                                         <TableBody>
                                       {paginatedData.map((record: any, index: number) => (
-                                        <TableRow key={`${tableName}-${record.id || record.payment_id || record['Payment Id'] || record.awb_number || record.awb || record.waybill_num || index}`}>
-                                          <TableCell className="font-medium w-[200px]">{record.order_id || "N/A"}</TableCell>
-                                          <TableCell className="w-[150px]">
-                                            ₹
-                                            {(
-                                              tableName === "snapmint" || tableName === "shipway"
-                                                ? record["Order Value"] || 0
-                                                : record.amount ||
-                                                  record.Amount ||
-                                                  record.cod_amount ||
-                                                  record.shipping_charges ||
-                                                  0
-                                            ).toFixed(2)}
-                                          </TableCell>
-                                          <TableCell className="w-[200px]">
-                                            {tableName === "snapmint"
-                                              ? record["Payment ID"] || "N/A"
-                                              : tableName === "shipway"
-                                                ? record.order_number || "N/A"
-                                                : record.payment_id ||
-                                                  record["Payment Id"] ||
-                                                  record.awb_number ||
-                                                  record.awb ||
-                                                  record.waybill_num ||
-                                                  "N/A"}
-                                          </TableCell>
-                                          <TableCell className="w-[200px]">
-                                            {tableName === "snapmint"
-                                              ? record["Order Number"] || "N/A"
-                                              : tableName === "bluedart"
-                                                ? record.order_number || "N/A"
+                                        tableName === 'cred_pay' ? (
+                                          <TableRow key={`cred_pay-${record.id || index}`}>
+                                            <TableCell className="w-[200px]">{record.order_id || "N/A"}</TableCell>
+                                            <TableCell className="w-[150px]">₹{(Number(record["Credited Amount"]) || 0).toFixed(2)}</TableCell>
+                                            <TableCell className="w-[200px]">{record["Payment ID"] || 'N/A'}</TableCell>
+                                            <TableCell className="w-[200px]">{record.payment_method || 'N/A'}</TableCell>
+                                            <TableCell className="w-[150px]">{formatDateForDisplay(record["Transaction Date"] || record.created_at)}</TableCell>
+                                          </TableRow>
+                                        ) : tableName === 'india_post' ? (
+                                          <TableRow key={`india_post-${record.id || index}`}>
+                                            <TableCell className="w-[200px]">{record.order_id || "N/A"}</TableCell>
+                                            <TableCell className="w-[150px]">₹{(Number(record["Credited Amount"]) || Number(record.Amount) || 0).toFixed(2)}</TableCell>
+                                            <TableCell className="w-[200px]">{record.AWB || 'N/A'}</TableCell>
+                                            <TableCell className="w-[200px]">{record["Order Number"] || 'N/A'}</TableCell>
+                                            <TableCell className="w-[150px]">{formatDateForDisplay(record["Transaction Date"] || record.created_at)}</TableCell>
+                                          </TableRow>
+                                        ) : (
+                                          <TableRow key={`${tableName}-${record.id || record.payment_id || record['Payment Id'] || record.awb_number || record.awb || record.waybill_num || index}`}>
+                                            <TableCell className="font-medium w-[200px]">{record.order_id || "N/A"}</TableCell>
+                                            <TableCell className="w-[150px]">
+                                              ₹
+                                              {(
+                                                tableName === "snapmint" || tableName === "shipway"
+                                                  ? record["Order Value"] || 0
+                                                  : record.amount ||
+                                                    record.Amount ||
+                                                    record.cod_amount ||
+                                                    record.shipping_charges ||
+                                                    0
+                                              ).toFixed(2)}
+                                            </TableCell>
+                                            <TableCell className="w-[200px]">
+                                              {tableName === "snapmint"
+                                                ? record["Payment ID"] || "N/A"
                                                 : tableName === "shipway"
-                                                  ? record.order_id || "N/A"
-                                                  : record.method ||
-                                                    record["Payment Method"] ||
-                                                    record.courier ||
-                                                    record.status ||
-                                                    record.carrier ||
+                                                  ? record.order_number || "N/A"
+                                                  : record.payment_id ||
+                                                    record["Payment Id"] ||
+                                                    record.awb_number ||
+                                                    record.awb ||
+                                                    record.waybill_num ||
                                                     "N/A"}
-                                          </TableCell>
-                                          <TableCell className="w-[150px]">
-                                            {formatDateForDisplay(
-                                              record.createdAt ||
-                                                record["Transaction Date"] ||
-                                                record.delivered_date ||
-                                                record.created_at ||
-                                                record.pick_up_date ||
-                                                record.pickup_date,
-                                            )}
-                                          </TableCell>
-                                        </TableRow>
+                                            </TableCell>
+                                            <TableCell className="w-[200px]">
+                                              {tableName === "snapmint"
+                                                ? record["Order Number"] || "N/A"
+                                                : tableName === "bluedart"
+                                                  ? record.order_number || "N/A"
+                                                  : tableName === "shipway"
+                                                    ? record.order_id || "N/A"
+                                                    : record.method ||
+                                                      record["Payment Method"] ||
+                                                      record.courier ||
+                                                      record.status ||
+                                                      record.carrier ||
+                                                      "N/A"}
+                                            </TableCell>
+                                            <TableCell className="w-[150px]">
+                                              {formatDateForDisplay(
+                                                record.createdAt ||
+                                                  record["Transaction Date"] ||
+                                                  record.delivered_date ||
+                                                  record.created_at ||
+                                                  record.pick_up_date ||
+                                                  record.pickup_date,
+                                              )}
+                                            </TableCell>
+                                          </TableRow>
+                                        )
                                       ))}
-                                         </TableBody>
-                                       </Table>
+                                        </TableBody>
+                                      </Table>
                                      </div>
                                    </div>
                                  </div>

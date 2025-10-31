@@ -9,11 +9,18 @@ const supabaseAnonKey =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlLWRlbW8iLCJpYXQiOjE3NTIzMDEwMzUsImV4cCI6MjA2NzY2MTAzNX0.n35bpBqTwJsnRZmfney0909gtAc5SPBH7kekrDFSikY"
 
 // Client-side Supabase client (for browser interactions)
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// In dev/preview, disable background token refresh to avoid noisy console errors
+const isProd = process.env.NODE_ENV === "production"
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: isProd,
+    persistSession: isProd,
+  },
+})
 
 // Server-side Supabase client (for Server Components/Actions)
-export function createSupabaseServerClient() {
-  const cookieStore = cookies()
+export async function createSupabaseServerClient() {
+  const cookieStore = await cookies()
 
   // For server-side, you would typically use process.env.SUPABASE_URL and process.env.SUPABASE_ANON_KEY.
   // The hardcoded values here are for v0 preview consistency.
@@ -46,6 +53,11 @@ export function createSupabaseServerClient() {
 
 // Database service functions (using the client-side supabase for now, can be updated to use server client for specific actions)
 export class DatabaseService {
+  // Type for reconciliation update input rows
+  // Adjust fields if your table expects different names
+  // (e.g., if it uses `total_payments` from `payment_amount`, we map below)
+  
+  static async detectTableSchema(tableName: string) {
   static async detectTableSchema(tableName: string) {
     try {
       const { data, error } = await supabase.from(tableName).select("*").limit(1)
@@ -161,10 +173,19 @@ export class DatabaseService {
     }
   }
 
-  static async updateReconciliation(reconciliationData) {
+  // Minimal shape for reconciliation upsert
+  type ReconciliationUpdateInput = {
+    order_id: string
+    order_amount: number
+    payment_amount: number
+    difference: number
+    status: "matched" | "discrepancy" | "match_pending" | "orphaned_order"
+  }
+
+  static async updateReconciliation(reconciliationData: ReconciliationUpdateInput[]) {
     try {
       const { error } = await supabase.from("reconciliation").upsert(
-        reconciliationData.map((r) => ({
+        reconciliationData.map((r: ReconciliationUpdateInput) => ({
           order_id: r.order_id,
           order_amount: r.order_amount,
           total_payments: r.payment_amount,

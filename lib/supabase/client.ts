@@ -7,7 +7,14 @@ const supabaseUrl = "https://recon.emiactech.com/"
 const supabaseAnonKey =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlLWRlbW8iLCJpYXQiOjE3NTIzMDEwMzUsImV4cCI6MjA2NzY2MTAzNX0.n35bpBqTwJsnRZmfney0909gtAc5SPBH7kekrDFSikY"
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+// In dev/preview, disable background token refresh to avoid noisy console errors
+const isProd = process.env.NODE_ENV === "production"
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    autoRefreshToken: isProd,
+    persistSession: isProd,
+  },
+})
 
 // Database service functions (using the client-side supabase)
 export class DatabaseService {

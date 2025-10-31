@@ -51,7 +51,7 @@ interface DashboardStats {
   totalOrderAmount: number
 }
 
-interface Order {
+  interface Order {
   id: string
   order_id: string
   order_number: string
@@ -67,8 +67,9 @@ interface Order {
   shipping_partner: string
   order_date: string
   shipped_date: string
-  delivered_date?: string
-  payment_captured_date?: string
+    delivered_date?: string
+    scanned_date?: string
+    payment_captured_date?: string
   product_name: string
   quantity: number
   customer_name?: string
@@ -399,7 +400,7 @@ export default function PaymentReconciliationDashboard() {
   const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState("all")
-  const [filterDateType, setFilterDateType] = useState<"order_date" | "shipped_date" | "delivered_date" | "payment_captured_date">("shipped_date")
+const [filterDateType, setFilterDateType] = useState<"order_date" | "shipped_date" | "delivered_date" | "payment_captured_date" | "scanned_date">("scanned_date")
   const [filterShippingDateType, setFilterShippingDateType] = useState<
     "all" | "current_month" | "last_month" | "last_quarter" | "custom_range"
   >("current_month")
@@ -1076,6 +1077,8 @@ export default function PaymentReconciliationDashboard() {
           dateToCheck = correspondingOrder.shipped_date
         } else if (filterDateType === "delivered_date") {
           dateToCheck = correspondingOrder.delivered_date || null
+        } else if (filterDateType === "scanned_date") {
+          dateToCheck = (correspondingOrder as any).scanned_date || null
         } else if (filterDateType === "payment_captured_date") {
           dateToCheck = correspondingOrder.payment_captured_date || null
         }
@@ -1196,6 +1199,8 @@ export default function PaymentReconciliationDashboard() {
           dateToCheck = order.shipped_date
         } else if (filterDateType === "delivered_date") {
           dateToCheck = order.delivered_date || null
+        } else if (filterDateType === "scanned_date") {
+          dateToCheck = (order as any).scanned_date || null
         } else if (filterDateType === "payment_captured_date") {
           dateToCheck = order.payment_captured_date || null
         }
@@ -1310,6 +1315,8 @@ export default function PaymentReconciliationDashboard() {
             dateToCheck = correspondingOrder.shipped_date
           } else if (filterDateType === "delivered_date") {
             dateToCheck = correspondingOrder.delivered_date || null
+          } else if (filterDateType === "scanned_date") {
+            dateToCheck = (correspondingOrder as any).scanned_date || null
           } else if (filterDateType === "payment_captured_date") {
             dateToCheck = correspondingOrder.payment_captured_date || null
           }
@@ -1829,6 +1836,7 @@ export default function PaymentReconciliationDashboard() {
             "Order Date": formatDateForDisplay(order.order_date),
             "Shipping Date": formatDateForDisplay(order.shipped_date),
             "Delivered Date": formatDateForDisplay(order.delivered_date),
+            "Scanned Date": formatDateForDisplay((order as any).scanned_date),
             "Payment Date": formatDateForDisplay(order.payment_captured_date),
             "Adjusted Amount": (order.adjusted_amount || 0).toFixed(2),
             Remark: order.remark || "",
@@ -1918,8 +1926,8 @@ export default function PaymentReconciliationDashboard() {
           Product: row.product_name,
           "Total Orders": row.totalOrders,
           "Total Quantity": row.totalQuantity,
-          "Scaned Out": row.scanOutQty,
-          "Scaned In": row.scanInQty,
+          "Scanned Out": row.scanOutQty,
+          "Scanned In": row.scanInQty,
           "Net Qty": row.netQty,
           "Total Revenue": row.totalRevenue.toFixed(2),
           "Latest Shipped Date": formatDateForDisplay(row.latestShippedDate),
@@ -2218,7 +2226,7 @@ export default function PaymentReconciliationDashboard() {
               </SelectContent>
             </Select>
           </div>
-          <Select value={filterDateType} onValueChange={(value: string) => setFilterDateType(value as "order_date" | "shipped_date" | "delivered_date" | "payment_captured_date")}>
+          <Select value={filterDateType} onValueChange={(value: string) => setFilterDateType(value as "order_date" | "shipped_date" | "delivered_date" | "payment_captured_date" | "scanned_date")}>
             <SelectTrigger className="w-full sm:w-[180px]">
               <SelectValue placeholder="Filter by Date Type" />
             </SelectTrigger>
@@ -2226,6 +2234,7 @@ export default function PaymentReconciliationDashboard() {
               <SelectItem value="order_date">Order Date</SelectItem>
               <SelectItem value="shipped_date">Shipped Date</SelectItem>
               <SelectItem value="delivered_date">Delivered Date</SelectItem>
+              <SelectItem value="scanned_date">Scanned Date</SelectItem>
               <SelectItem value="payment_captured_date">Payment Date</SelectItem>
             </SelectContent>
           </Select>
@@ -2415,8 +2424,8 @@ export default function PaymentReconciliationDashboard() {
                           <TableHead className="w-[200px]">SKU</TableHead>
                           <TableHead className="w-[240px]">Product</TableHead>
                           <TableHead className="w-[140px] text-right">Total Orders</TableHead>
-                          <TableHead className="w-[140px] text-right">Scaned Out</TableHead>
-                          <TableHead className="w-[140px] text-right">Scaned In</TableHead>
+                          <TableHead className="w-[140px] text-right">Scanned Out</TableHead>
+                          <TableHead className="w-[140px] text-right">Scanned In</TableHead>
                           <TableHead className="w-[140px] text-right">Net Qty</TableHead>
                           
                         </TableRow>
@@ -2532,9 +2541,10 @@ export default function PaymentReconciliationDashboard() {
                               <TableHead className="w-[80px] text-right">Qty</TableHead>
                               <TableHead className="w-[280px]">Product</TableHead>
                               <TableHead className="w-[140px] text-right">Amount</TableHead>
-                              <TableHead className="w-[140px]">Order Date</TableHead>
-                              <TableHead className="w-[140px]">Shipped Date</TableHead>
-                              <TableHead className="w-[140px]">Delivered Date</TableHead>
+                          <TableHead className="w-[140px]">Order Date</TableHead>
+                          <TableHead className="w-[140px]">Shipped Date</TableHead>
+                          <TableHead className="w-[140px]">Delivered Date</TableHead>
+                          <TableHead className="w-[140px]">Scanned Date</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -2548,6 +2558,7 @@ export default function PaymentReconciliationDashboard() {
                                 <TableCell className="w-[140px]">{formatDateForDisplay(order.order_date)}</TableCell>
                                 <TableCell className="w-[140px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
                                 <TableCell className="w-[140px]">{formatDateForDisplay(order.delivered_date)}</TableCell>
+                                <TableCell className="w-[140px]">{formatDateForDisplay((order as any).scanned_date)}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>
@@ -2566,6 +2577,7 @@ export default function PaymentReconciliationDashboard() {
                             "Order Date": formatDateForDisplay(order.order_date),
                             "Shipped Date": formatDateForDisplay(order.shipped_date),
                             "Delivered Date": formatDateForDisplay(order.delivered_date),
+                            "Scanned Date": formatDateForDisplay((order as any).scanned_date),
                           }))
                           const filename = `orders_${(selectedSku || 'sku').replace(/[^a-zA-Z0-9_-]/g, '')}.csv`
                           exportToCsv(data, filename)
@@ -2604,6 +2616,7 @@ export default function PaymentReconciliationDashboard() {
                             <TableHead className="w-[120px]">Order Status</TableHead>
                             <TableHead className="w-[120px]">Order Date</TableHead>
                             <TableHead className="w-[120px]">Shipping Date</TableHead>
+                            <TableHead className="w-[120px]">Scanned Date</TableHead>
                             <TableHead className="w-[120px]">Payment Date</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -2645,6 +2658,7 @@ export default function PaymentReconciliationDashboard() {
                               </TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.order_date)}</TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.shipped_date)}</TableCell>
+                              <TableCell className="w-[120px]">{formatDateForDisplay((order as any).scanned_date)}</TableCell>
                               <TableCell className="w-[120px]">{formatDateForDisplay(order.payment_captured_date)}</TableCell>
                             </TableRow>
                           ))}

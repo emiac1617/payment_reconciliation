@@ -619,6 +619,12 @@ const [filterDateType, setFilterDateType] = useState<"order_date" | "shipped_dat
           creditNotesData = await res.json()
         } else {
           console.warn('Credit notes API returned non-200:', res.status)
+          // Fallback to client-side fetch if server API fails (e.g., env mismatch/RLS)
+          try {
+            creditNotesData = await DatabaseService.getCreditNotes()
+          } catch (e2) {
+            console.error('Fallback client fetch for credit notes also failed:', e2)
+          }
         }
       } catch (e) {
         console.error('Failed to fetch credit notes from API, falling back to client fetch:', e)
